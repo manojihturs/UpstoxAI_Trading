@@ -1,0 +1,6 @@
+requests
+pandas
+numpy
+streamlit
+streamlit-autorefresh
+pytest

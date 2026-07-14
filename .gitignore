@@ -1,0 +1,10 @@
+upstox_token.txt
+trading_state.db
+trading_state.db-wal
+trading_state.db-shm
+*.csv
+__pycache__/
+*.pyc
+.streamlit/
+.claude/
+.pytest_cache/
