@@ -65,6 +65,8 @@ col_title, col_status = st.columns([4, 1])
 with col_title:
     st.title("Paper Trading -- Nifty / BankNifty / Sensex")
     st.caption("Semi-automatic. Paper money only. No real orders are ever placed.")
+    trend_filter_status = "ON (EMA50 trend filter)" if config.STRATEGY["ENABLE_TREND_FILTER"] else "OFF (baseline EMA9/20 cross only)"
+    st.caption(f"Strategy: {trend_filter_status}")
 with col_status:
     if snapshot["engine_alive"]:
         st.success("Engine: running")

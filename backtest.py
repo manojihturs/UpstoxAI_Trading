@@ -35,7 +35,7 @@ import pandas as pd
 
 import config
 import cost_model
-from signal_engine import compute_indicators, get_signal
+from signal_engine import compute_indicators, get_signal, confirm_with_trend_filter, _ema
 from option_selector import round_to_atm
 from engine import evaluate_position, compute_sl_points
 
@@ -85,6 +85,9 @@ def compute_realized_vol(df):
 def backtest_instrument(name, csv_path, cfg):
     df = pd.read_csv(csv_path, parse_dates=["timestamp"])
     df = compute_indicators(df)
+    if config.STRATEGY["ENABLE_TREND_FILTER"]:
+        ema_period = config.STRATEGY["TREND_FILTER_EMA_PERIOD"]
+        df[f"EMA{ema_period}"] = _ema(df["close"], ema_period)
     df["realized_vol"] = compute_realized_vol(df)
     df = df.dropna(subset=["realized_vol"]).reset_index(drop=True)
 
@@ -132,6 +135,11 @@ def backtest_instrument(name, csv_path, cfg):
         signal = get_signal(row)
         if signal not in ("CE", "PE"):
             continue
+
+        if config.STRATEGY["ENABLE_TREND_FILTER"]:
+            ema_period = config.STRATEGY["TREND_FILTER_EMA_PERIOD"]
+            if not confirm_with_trend_filter(signal, row["close"], row[f"EMA{ema_period}"]):
+                continue
 
         strike = round_to_atm(spot, cfg["strike_step"])
         entry_raw = black_scholes_price(spot, strike, years_to_expiry, RISK_FREE_RATE, sigma, signal)

@@ -106,3 +106,27 @@ def confirm_with_pcr(direction, pcr, bullish_min, bearish_max):
     if direction == 'PE':
         return pcr <= bearish_max
     return False
+
+
+def confirm_with_trend_filter(direction, close, ema_long):
+    """
+    Optional second opinion on top of get_signal(): only agree with the
+    raw EMA9/EMA20 crossover if price is also on the correct side of a
+    longer EMA (default period 50), filtering out counter-trend whipsaws.
+
+    This is "Variant C" from backtest_experiments.py -- the only variant
+    tested there that improved results on BOTH a training window and a
+    held-out window it was never checked against, which is why it's the
+    one wired up as a togglable option (config.STRATEGY) rather than the
+    others. Still off by default; see config.py.
+
+    direction: 'CE' or 'PE', as returned by get_signal()
+    close: current close price
+    ema_long: the longer-period EMA value (e.g. EMA50) at this candle
+    Returns True if the trend filter agrees with the direction.
+    """
+    if direction == 'CE':
+        return close > ema_long
+    if direction == 'PE':
+        return close < ema_long
+    return False

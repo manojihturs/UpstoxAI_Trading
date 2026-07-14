@@ -87,6 +87,18 @@ PCR = {
     "BEARISH_MAX": 0.9,   # PCR <= this confirms PE (bearish)
 }
 
+# ---- Trend filter confirmation (signal_engine.confirm_with_trend_filter) ----
+# "Variant C" from backtest_experiments.py: only take the EMA9/EMA20 cross if
+# price also agrees with a longer EMA. The only variant tested there that
+# improved results on both a training window and a held-out window it never
+# saw -- still off by default so you can compare it against the baseline
+# live before trusting it. Flip ENABLE_TREND_FILTER to True to turn it on;
+# used identically by engine.py (live) and backtest.py (so they never diverge).
+STRATEGY = {
+    "ENABLE_TREND_FILTER": False,
+    "TREND_FILTER_EMA_PERIOD": 50,
+}
+
 # ---- Timing ----
 TIMING = {
     "MARKET_OPEN": MARKET_OPEN,

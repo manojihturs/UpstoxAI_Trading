@@ -29,7 +29,7 @@ import config
 import state_store
 import cost_model
 import trade_export
-from signal_engine import compute_indicators, get_signal, confirm_with_pcr
+from signal_engine import compute_indicators, get_signal, confirm_with_pcr, confirm_with_trend_filter, _ema
 from option_selector import (
     get_access_token, get_atm_option, get_intraday_candles, get_live_ltp,
     get_nearest_weekly_expiry, get_option_chain, compute_pcr, get_quotes,
@@ -197,6 +197,9 @@ def scan_for_signal(instrument_states, headers):
             continue
 
         df = compute_indicators(candles)
+        if config.STRATEGY["ENABLE_TREND_FILTER"]:
+            ema_period = config.STRATEGY["TREND_FILTER_EMA_PERIOD"]
+            df[f"EMA{ema_period}"] = _ema(df["close"], ema_period)
         latest = df.iloc[-1]
         if state["last_candle_ts"] == latest["timestamp"]:
             continue
@@ -205,6 +208,12 @@ def scan_for_signal(instrument_states, headers):
         signal = get_signal(latest)
         if signal not in ("CE", "PE"):
             continue
+
+        if config.STRATEGY["ENABLE_TREND_FILTER"]:
+            ema_period = config.STRATEGY["TREND_FILTER_EMA_PERIOD"]
+            if not confirm_with_trend_filter(signal, latest["close"], latest[f"EMA{ema_period}"]):
+                print(f"{name}: {signal} signal rejected by trend filter (close vs EMA{ema_period})")
+                continue
 
         if config.PCR["ENABLE_PCR_CONFIRMATION"]:
             try:
