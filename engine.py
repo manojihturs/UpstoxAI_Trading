@@ -28,6 +28,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import config
 import state_store
 import cost_model
+import trade_export
 from signal_engine import compute_indicators, get_signal, confirm_with_pcr
 from option_selector import (
     get_access_token, get_atm_option, get_intraday_candles, get_live_ltp,
@@ -148,6 +149,12 @@ def manage_open_position(position, headers, current_time):
                                     gross_pnl, costs_total, net_pnl)
         print(f"EXIT {exit_reason}: {position['instrument']} {position['direction']} "
               f"{position['strike']} net_pnl={net_pnl:.2f}")
+
+        try:
+            closed = state_store.get_position_by_id(position["id"])
+            trade_export.append_closed_trade(closed)
+        except Exception as e:
+            print(f"WARNING: failed to append closed trade to Excel backup: {e}")
     else:
         print(f"Holding {position['instrument']} {position['direction']} {position['strike']} | "
               f"live={raw_ltp:.2f} sl={new_sl:.2f} tsl_armed={new_tsl_armed}")

@@ -229,6 +229,15 @@ def get_open_position():
         conn.close()
 
 
+def get_position_by_id(position_id):
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT * FROM positions WHERE id = ?", (position_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
 def update_position_trailing_sl(position_id, current_sl, tsl_armed):
     conn = _connect()
     try:
