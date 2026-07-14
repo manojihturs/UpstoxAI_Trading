@@ -95,7 +95,7 @@ PCR = {
 # live before trusting it. Flip ENABLE_TREND_FILTER to True to turn it on;
 # used identically by engine.py (live) and backtest.py (so they never diverge).
 STRATEGY = {
-    "ENABLE_TREND_FILTER": False,
+    "ENABLE_TREND_FILTER": True,
     "TREND_FILTER_EMA_PERIOD": 50,
 }
 
