@@ -9,3 +9,4 @@ __pycache__/
 .streamlit/
 .claude/
 .pytest_cache/
+.venv/
