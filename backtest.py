@@ -260,8 +260,14 @@ def main():
 
     trades_df = pd.DataFrame(all_trades)
     out_path = os.path.join(BASE_DIR, "backtest_results.csv")
-    trades_df.to_csv(out_path, index=False)
-    print(f"\nSaved {len(trades_df)} trades to {out_path}")
+    try:
+        trades_df.to_csv(out_path, index=False)
+        print(f"\nSaved {len(trades_df)} trades to {out_path}")
+    except PermissionError:
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        fallback_path = os.path.join(BASE_DIR, f"backtest_results_{ts}.csv")
+        trades_df.to_csv(fallback_path, index=False)
+        print(f"\n{out_path} is locked (probably open in Excel) -- saved to {fallback_path} instead.")
 
     write_summary_json(trades_df, os.path.join(BASE_DIR, "backtest_summary.json"))
 
