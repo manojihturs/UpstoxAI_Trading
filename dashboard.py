@@ -134,6 +134,35 @@ if today_closed:
         f"{row.instrument} Rs {row.net_pnl:,.2f}" for row in breakdown.itertuples()
     ))
 
+# ------------------------------------------------------- cumulative drawdown
+cum_stats = snapshot["cumulative_pnl_stats"]
+risk_state = snapshot["risk_state"]
+cd1, cd2, cd3 = st.columns(3)
+cd1.metric("All-time P&L", f"Rs {cum_stats['cumulative_pnl']:,.2f}")
+cd2.metric("Peak P&L", f"Rs {cum_stats['peak_pnl']:,.2f}")
+cd3.metric("Current Drawdown", f"Rs {cum_stats['drawdown']:,.2f}")
+
+if not config.RISK["ENABLE_CUMULATIVE_DRAWDOWN_BREAKER"]:
+    st.caption(
+        "Cumulative drawdown breaker: OFF. The daily cap above resets every day and can't "
+        "catch a losing streak spread across many days -- enable "
+        "config.RISK.ENABLE_CUMULATIVE_DRAWDOWN_BREAKER to guard against that too."
+    )
+elif risk_state["cumulative_breaker_tripped"]:
+    st.error(
+        f"TRADING HALTED -- cumulative drawdown breached -Rs "
+        f"{config.RISK['MAX_CUMULATIVE_DRAWDOWN']:,.0f} at {risk_state['tripped_at']}. "
+        f"No new entries anywhere until this is manually reset (it does NOT auto-reset daily)."
+    )
+    if st.button("Reset Cumulative Drawdown Breaker (testing only)"):
+        state_store.create_control_request("RESET_CUMULATIVE_BREAKER")
+        st.rerun()
+else:
+    st.caption(
+        f"Cumulative drawdown breaker: ON. Halts all new entries if drawdown exceeds "
+        f"-Rs {config.RISK['MAX_CUMULATIVE_DRAWDOWN']:,.0f} from its running peak."
+    )
+
 st.divider()
 
 # ------------------------------------------------------------ pending signal
@@ -154,7 +183,7 @@ else:
     st.caption(f"Expiry: {pending['expiry']} | Worst-case loss at SL (estimate): {worst_case} | "
                f"Proposal expires: {pending['expires_at']}")
 
-    confirm_disabled = bool(summary["circuit_breaker_tripped"])
+    confirm_disabled = bool(summary["circuit_breaker_tripped"]) or bool(risk_state["cumulative_breaker_tripped"])
     bc1, bc2 = st.columns(2)
     with bc1:
         if st.button("Confirm Entry", type="primary", disabled=confirm_disabled, use_container_width=True):
@@ -165,7 +194,7 @@ else:
             state_store.create_control_request("REJECT_SIGNAL", {"signal_id": pending["id"]})
             st.rerun()
     if confirm_disabled:
-        st.warning("Confirm is disabled while the daily circuit breaker is tripped.")
+        st.warning("Confirm is disabled while a circuit breaker (daily or cumulative drawdown) is tripped.")
 
 st.divider()
 

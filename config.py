@@ -59,6 +59,19 @@ RISK = {
     "CAPITAL": 50000,                 # rupees; informational only, not enforced as margin here
     "MAX_TRADES_BUDGET_DIVISOR": 4,   # sub-divides DAILY_LOSS_CAP across potential trades/day
     "SINGLE_POSITION_ONLY": True,     # only one open position across all instruments at a time
+
+    # Off by default. The daily cap above only limits loss WITHIN a single
+    # day and resets every morning -- it does nothing to stop a losing
+    # streak that compounds across many days/weeks (backtest.py found a
+    # ~1-year stretch where cumulative P&L stayed below -Rs 50,000, the
+    # full stated capital, well before it eventually recovered). This
+    # breaker tracks all-time cumulative P&L vs. its running peak and
+    # blocks ALL new entries once the drawdown from that peak exceeds
+    # MAX_CUMULATIVE_DRAWDOWN. Unlike the daily breaker it does NOT
+    # auto-reset -- once tripped it requires a manual reset, since the
+    # point is to force a real pause, not silently resume on a small uptick.
+    "ENABLE_CUMULATIVE_DRAWDOWN_BREAKER": True,
+    "MAX_CUMULATIVE_DRAWDOWN": 15000,  # rupees; 30% of CAPITAL above
 }
 
 # ---- Costs (retail discount-broker assumptions; approximate, tune as needed) ----

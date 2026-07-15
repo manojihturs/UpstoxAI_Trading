@@ -243,6 +243,27 @@ def scan_for_signal(instrument_states, headers):
 
 # -------------------------------------------------------- control requests
 
+def check_cumulative_drawdown_breaker():
+    """If enabled, trips (persists) the cumulative breaker the first time
+    all-time drawdown from its running peak exceeds MAX_CUMULATIVE_DRAWDOWN.
+    Once tripped it stays tripped until a manual reset -- see config.py for
+    why this doesn't auto-reset like the daily one. Returns True if new
+    entries should be blocked right now."""
+    if not config.RISK["ENABLE_CUMULATIVE_DRAWDOWN_BREAKER"]:
+        return False
+    state = state_store.get_risk_state()
+    if state["cumulative_breaker_tripped"]:
+        return True
+    stats = state_store.get_cumulative_pnl_stats()
+    if stats["drawdown"] <= -config.RISK["MAX_CUMULATIVE_DRAWDOWN"]:
+        state_store.trip_cumulative_breaker()
+        print(f"CUMULATIVE DRAWDOWN BREAKER TRIPPED: drawdown {stats['drawdown']:.2f} "
+              f"breached -{config.RISK['MAX_CUMULATIVE_DRAWDOWN']}. Blocking new entries "
+              f"until manually reset.")
+        return True
+    return False
+
+
 def handle_confirm(signal_id, headers, today):
     sig = state_store.get_pending_signal_by_id(signal_id)
     if not sig or sig["status"] != "PENDING":
@@ -256,6 +277,11 @@ def handle_confirm(signal_id, headers, today):
     if summary["circuit_breaker_tripped"]:
         state_store.set_pending_signal_status(signal_id, "REJECTED")
         print(f"Confirm rejected for signal {signal_id}: daily circuit breaker is tripped")
+        return
+
+    if check_cumulative_drawdown_breaker():
+        state_store.set_pending_signal_status(signal_id, "REJECTED")
+        print(f"Confirm rejected for signal {signal_id}: cumulative drawdown breaker is tripped")
         return
 
     if state_store.get_open_position():
@@ -293,6 +319,9 @@ def process_control_requests(headers, today):
             elif req["kind"] == "RESET_BREAKER":
                 state_store.reset_circuit_breaker(today)
                 print("Circuit breaker manually reset (testing mode).")
+            elif req["kind"] == "RESET_CUMULATIVE_BREAKER":
+                state_store.reset_cumulative_breaker()
+                print("Cumulative drawdown breaker manually reset.")
         except Exception as e:
             print(f"ERROR handling control request {req['id']} ({req['kind']}): {e}")
         state_store.mark_control_request_handled(req["id"])
@@ -345,7 +374,8 @@ def main():
             else:
                 summary = state_store.recompute_daily_summary(today, config.RISK["DAILY_LOSS_CAP"])
                 pending = state_store.get_pending_signal()
-                if (not pending and not summary["circuit_breaker_tripped"]
+                cumulative_tripped = check_cumulative_drawdown_breaker()
+                if (not pending and not summary["circuit_breaker_tripped"] and not cumulative_tripped
                         and current_time <= config.TIMING["LAST_ENTRY_TIME"]):
                     scan_for_signal(instrument_states, headers)
         except Exception as e:

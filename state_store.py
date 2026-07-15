@@ -88,6 +88,12 @@ def init_db():
                 tripped_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS risk_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                cumulative_breaker_tripped INTEGER NOT NULL DEFAULT 0,
+                tripped_at TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS engine_heartbeat (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 last_poll_at TEXT,
@@ -386,6 +392,68 @@ def reset_circuit_breaker(date_str):
         conn.close()
 
 
+# ---------------------------------------------------------- cumulative drawdown
+
+def get_cumulative_pnl_stats():
+    """All-time (all closed trades, any date) cumulative P&L, running peak,
+    and current drawdown from that peak -- unlike daily_summary, this never
+    resets on its own; it's meant to catch a losing streak that spans many
+    days, which the per-day cap can't see."""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT net_pnl FROM positions WHERE status = 'CLOSED' ORDER BY exit_time ASC"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    cumulative = 0.0
+    peak = 0.0
+    for row in rows:
+        cumulative += row["net_pnl"]
+        peak = max(peak, cumulative)
+    return {"cumulative_pnl": cumulative, "peak_pnl": peak, "drawdown": cumulative - peak}
+
+
+def get_risk_state():
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT * FROM risk_state WHERE id = 1").fetchone()
+        if row is None:
+            conn.execute(
+                "INSERT INTO risk_state (id, cumulative_breaker_tripped) VALUES (1, 0)"
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM risk_state WHERE id = 1").fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+
+def trip_cumulative_breaker():
+    conn = _connect()
+    try:
+        conn.execute(
+            "INSERT INTO risk_state (id, cumulative_breaker_tripped, tripped_at) VALUES (1, 1, ?) "
+            "ON CONFLICT(id) DO UPDATE SET cumulative_breaker_tripped = 1, tripped_at = excluded.tripped_at",
+            (_now_iso(),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def reset_cumulative_breaker():
+    conn = _connect()
+    try:
+        conn.execute(
+            "UPDATE risk_state SET cumulative_breaker_tripped = 0, tripped_at = NULL WHERE id = 1"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------- engine_heartbeat
 
 def update_heartbeat(pid):
@@ -500,6 +568,8 @@ def get_dashboard_snapshot():
         "engine_alive": is_engine_alive(),
         "closed_positions": get_closed_positions(limit=100),
         "spot_quotes": get_spot_quotes(),
+        "cumulative_pnl_stats": get_cumulative_pnl_stats(),
+        "risk_state": get_risk_state(),
     }
 
 
