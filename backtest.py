@@ -29,6 +29,8 @@ option P&L, and NOT a promise about future performance either way.
 """
 import math
 import os
+import json
+import datetime
 
 import numpy as np
 import pandas as pd
@@ -175,33 +177,73 @@ def print_caveat():
     print("=" * 78)
 
 
-def summarize(trades_df):
+def compute_summary(trades_df):
+    """Shared by summarize() (console) and write_summary_json() (dashboard
+    display) so the two never report different numbers."""
     if trades_df.empty:
-        print("\nNo trades were generated over the backtest period.")
-        return
+        return None
 
     total = len(trades_df)
     wins = int((trades_df["net_pnl"] > 0).sum())
     losses = total - wins
-    win_rate = wins / total * 100
-    avg_pnl = trades_df["net_pnl"].mean()
-    total_pnl = trades_df["net_pnl"].sum()
-
     cum = trades_df.sort_values("exit_time")["net_pnl"].cumsum()
     running_max = cum.cummax()
-    max_drawdown = (cum - running_max).min()
 
-    print(f"\nTotal trades: {total}")
-    print(f"Win rate: {win_rate:.1f}%  ({wins} wins / {losses} losses)")
-    print(f"Average net P&L per trade: Rs {avg_pnl:,.2f}")
-    print(f"Total net P&L: Rs {total_pnl:,.2f}")
-    print(f"Max cumulative drawdown: Rs {max_drawdown:,.2f}")
+    per_instrument = (
+        trades_df.groupby("instrument")["net_pnl"].agg(trades="count", total="sum", average="mean").round(2)
+    )
+    per_exit_reason = (
+        trades_df.groupby("exit_reason")["net_pnl"].agg(trades="count", total="sum", average="mean").round(2)
+    )
+
+    return {
+        "total_trades": total,
+        "wins": wins,
+        "losses": losses,
+        "win_rate_pct": round(wins / total * 100, 1),
+        "avg_pnl": round(trades_df["net_pnl"].mean(), 2),
+        "total_pnl": round(trades_df["net_pnl"].sum(), 2),
+        "max_drawdown": round((cum - running_max).min(), 2),
+        "date_range": [str(trades_df["exit_time"].min()), str(trades_df["exit_time"].max())],
+        "per_instrument": per_instrument.reset_index().to_dict(orient="records"),
+        "per_exit_reason": per_exit_reason.reset_index().to_dict(orient="records"),
+    }
+
+
+def summarize(trades_df):
+    summary = compute_summary(trades_df)
+    if summary is None:
+        print("\nNo trades were generated over the backtest period.")
+        return
+
+    print(f"\nTotal trades: {summary['total_trades']}")
+    print(f"Win rate: {summary['win_rate_pct']}%  ({summary['wins']} wins / {summary['losses']} losses)")
+    print(f"Average net P&L per trade: Rs {summary['avg_pnl']:,.2f}")
+    print(f"Total net P&L: Rs {summary['total_pnl']:,.2f}")
+    print(f"Max cumulative drawdown: Rs {summary['max_drawdown']:,.2f}")
 
     print("\nBy instrument:")
-    print(trades_df.groupby("instrument")["net_pnl"].agg(trades="count", total="sum", average="mean").round(2))
+    print(pd.DataFrame(summary["per_instrument"]).set_index("instrument"))
 
     print("\nBy exit reason:")
-    print(trades_df.groupby("exit_reason")["net_pnl"].agg(trades="count", total="sum", average="mean").round(2))
+    print(pd.DataFrame(summary["per_exit_reason"]).set_index("exit_reason"))
+
+
+def write_summary_json(trades_df, out_path):
+    """Compact summary the dashboard reads to show a 'Strategy Analysis'
+    section -- local-only (like trade_history.xlsx): the historical CSVs
+    this is computed from aren't shipped to the cloud deploy, so this file
+    won't exist there and the dashboard shows a friendly fallback instead."""
+    summary = compute_summary(trades_df)
+    payload = {
+        "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "trend_filter_enabled": config.STRATEGY["ENABLE_TREND_FILTER"],
+        "assumed_days_to_expiry": ASSUMED_DAYS_TO_EXPIRY,
+        "summary": summary,
+    }
+    with open(out_path, "w") as f:
+        json.dump(payload, f, indent=2)
+    print(f"Saved summary to {out_path}")
 
 
 def main():
@@ -220,6 +262,8 @@ def main():
     out_path = os.path.join(BASE_DIR, "backtest_results.csv")
     trades_df.to_csv(out_path, index=False)
     print(f"\nSaved {len(trades_df)} trades to {out_path}")
+
+    write_summary_json(trades_df, os.path.join(BASE_DIR, "backtest_summary.json"))
 
     print_caveat()
     summarize(trades_df)
