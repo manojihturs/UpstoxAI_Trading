@@ -30,14 +30,18 @@ def get_access_token():
 
 
 def get_nearest_weekly_expiry(headers, instrument_key=INSTRUMENT_KEY):
-    """Fetch available expiries and return the nearest one (today or future)."""
+    """Fetch available expiries and return the nearest one -- STRICTLY after
+    today, never today itself. Picking today's own expiry would mean buying
+    an option with only hours of remaining life, where time decay and
+    pricing behave very differently from the rest of the week; this guard
+    always rolls forward to next week's contract on expiry day instead."""
     url = f"https://api.upstox.com/v2/option/contract?instrument_key={instrument_key}"
     resp = requests.get(url, headers=headers)
     resp.raise_for_status()
     data = resp.json().get("data", [])
     expiries = sorted(set(item["expiry"] for item in data))
     today = datetime.date.today().isoformat()
-    future_expiries = [e for e in expiries if e >= today]
+    future_expiries = [e for e in expiries if e > today]
     if not future_expiries:
         raise ValueError("No future expiries found")
     return future_expiries[0]
