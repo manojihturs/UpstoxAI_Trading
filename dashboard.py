@@ -51,7 +51,10 @@ def check_password():
     return False
 
 
-if not check_password():
+# Login is togglable via the 'require_login' secret so it can be turned
+# back on later without a code change. Defaults to True (safe default) if
+# the secret is unset, so a fresh deploy without this key stays protected.
+if st.secrets.get("require_login", True) and not check_password():
     st.stop()
 
 st_autorefresh(interval=5000, key="refresh")
