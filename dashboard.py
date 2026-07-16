@@ -231,6 +231,17 @@ else:
 
 st.divider()
 
+# -------------------------------------------------------------- activity log
+st.subheader("Activity Log")
+activity = snapshot["activity_log"]
+if not activity:
+    st.info("No activity yet -- signals, entries, exits, and breaker events will appear here as they happen.")
+else:
+    log_df = pd.DataFrame(activity)[["timestamp", "event_type", "message"]]
+    st.dataframe(log_df, use_container_width=True, hide_index=True, height=250)
+
+st.divider()
+
 # ------------------------------------------------------------ trade history
 st.subheader("Trade History")
 closed = snapshot["closed_positions"]

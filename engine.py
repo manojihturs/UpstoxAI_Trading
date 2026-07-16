@@ -46,6 +46,14 @@ def get_headers():
     return {"Accept": "application/json", "Authorization": f"Bearer {get_access_token()}"}
 
 
+def log(event_type, message):
+    """Print (for the console/Monitor) AND persist to activity_log so the
+    dashboard can show a running log of what the engine has done, not just
+    its current snapshot state."""
+    print(message)
+    state_store.log_event(event_type, message)
+
+
 # ---------------------------------------------------------------- test mode
 
 def _read_test_override():
@@ -147,8 +155,8 @@ def manage_open_position(position, headers, current_time):
         net_pnl = gross_pnl - costs_total
         state_store.close_position(position["id"], raw_ltp, exit_net, exit_reason,
                                     gross_pnl, costs_total, net_pnl)
-        print(f"EXIT {exit_reason}: {position['instrument']} {position['direction']} "
-              f"{position['strike']} net_pnl={net_pnl:.2f}")
+        log("EXIT", f"EXIT {exit_reason}: {position['instrument']} {position['direction']} "
+                     f"{position['strike']} net_pnl={net_pnl:.2f}")
 
         try:
             closed = state_store.get_position_by_id(position["id"])
@@ -237,7 +245,7 @@ def scan_for_signal(instrument_states, headers):
         qty = cfg["lot_size"]
         state_store.create_pending_signal(name, signal, opt["strike"], opt["expiry"], opt["instrument_key"],
                                            opt["ltp"], qty, config.TIMING["PENDING_SIGNAL_TTL_SECONDS"])
-        print(f"SIGNAL: {name} {signal} strike={opt['strike']} ltp={opt['ltp']} -- awaiting confirmation")
+        log("SIGNAL", f"SIGNAL: {name} {signal} strike={opt['strike']} ltp={opt['ltp']} -- awaiting confirmation")
         return  # single-position design: stop scanning once one signal is proposed
 
 
@@ -257,9 +265,9 @@ def check_cumulative_drawdown_breaker():
     stats = state_store.get_cumulative_pnl_stats()
     if stats["drawdown"] <= -config.RISK["MAX_CUMULATIVE_DRAWDOWN"]:
         state_store.trip_cumulative_breaker()
-        print(f"CUMULATIVE DRAWDOWN BREAKER TRIPPED: drawdown {stats['drawdown']:.2f} "
-              f"breached -{config.RISK['MAX_CUMULATIVE_DRAWDOWN']}. Blocking new entries "
-              f"until manually reset.")
+        log("BREAKER", f"CUMULATIVE DRAWDOWN BREAKER TRIPPED: drawdown {stats['drawdown']:.2f} "
+                        f"breached -{config.RISK['MAX_CUMULATIVE_DRAWDOWN']}. Blocking new entries "
+                        f"until manually reset.")
         return True
     return False
 
@@ -276,25 +284,25 @@ def handle_confirm(signal_id, headers, today):
     summary = state_store.recompute_daily_summary(today, config.RISK["DAILY_LOSS_CAP"])
     if summary["circuit_breaker_tripped"]:
         state_store.set_pending_signal_status(signal_id, "REJECTED")
-        print(f"Confirm rejected for signal {signal_id}: daily circuit breaker is tripped")
+        log("REJECTED", f"Confirm rejected for signal {signal_id}: daily circuit breaker is tripped")
         return
 
     if check_cumulative_drawdown_breaker():
         state_store.set_pending_signal_status(signal_id, "REJECTED")
-        print(f"Confirm rejected for signal {signal_id}: cumulative drawdown breaker is tripped")
+        log("REJECTED", f"Confirm rejected for signal {signal_id}: cumulative drawdown breaker is tripped")
         return
 
     if state_store.get_open_position():
         state_store.set_pending_signal_status(signal_id, "REJECTED")
-        print(f"Confirm rejected for signal {signal_id}: a position is already open")
+        log("REJECTED", f"Confirm rejected for signal {signal_id}: a position is already open")
         return
 
     raw_ltp = get_test_or_live_ltp(sig["instrument_key"], headers)
     sl_points = compute_sl_points(sig["instrument"], raw_ltp)
     if sl_points is None:
         state_store.set_pending_signal_status(signal_id, "REJECTED")
-        print(f"Confirm rejected for signal {signal_id}: risk budget can't support a safe "
-              f"stop at premium {raw_ltp}")
+        log("REJECTED", f"Confirm rejected for signal {signal_id}: risk budget can't support a safe "
+                         f"stop at premium {raw_ltp}")
         return
 
     entry_net = cost_model.apply_slippage(raw_ltp, "BUY")
@@ -305,8 +313,8 @@ def handle_confirm(signal_id, headers, today):
                                sig["instrument_key"], sig["qty"], raw_ltp, entry_net,
                                initial_sl, target_price)
     state_store.set_pending_signal_status(signal_id, "CONFIRMED")
-    print(f"ENTRY: {sig['instrument']} {sig['direction']} {sig['strike']} @ net {entry_net:.2f} "
-          f"(raw {raw_ltp:.2f}) SL={initial_sl:.2f} target={target_price:.2f}")
+    log("ENTRY", f"ENTRY: {sig['instrument']} {sig['direction']} {sig['strike']} @ net {entry_net:.2f} "
+                  f"(raw {raw_ltp:.2f}) SL={initial_sl:.2f} target={target_price:.2f}")
 
 
 def process_control_requests(headers, today):
@@ -316,12 +324,13 @@ def process_control_requests(headers, today):
                 handle_confirm(req["payload"]["signal_id"], headers, today)
             elif req["kind"] == "REJECT_SIGNAL":
                 state_store.set_pending_signal_status(req["payload"]["signal_id"], "REJECTED")
+                log("REJECTED", f"Signal {req['payload']['signal_id']} rejected by user.")
             elif req["kind"] == "RESET_BREAKER":
                 state_store.reset_circuit_breaker(today)
-                print("Circuit breaker manually reset (testing mode).")
+                log("BREAKER", "Daily circuit breaker manually reset (testing mode).")
             elif req["kind"] == "RESET_CUMULATIVE_BREAKER":
                 state_store.reset_cumulative_breaker()
-                print("Cumulative drawdown breaker manually reset.")
+                log("BREAKER", "Cumulative drawdown breaker manually reset.")
         except Exception as e:
             print(f"ERROR handling control request {req['id']} ({req['kind']}): {e}")
         state_store.mark_control_request_handled(req["id"])
@@ -334,9 +343,7 @@ def main():
     works equally as a standalone process or as a background thread inside
     a long-lived host process (e.g. Streamlit Community Cloud, which has no
     separate worker process -- see ensure_background_thread())."""
-    print("Trading engine started.")
-    print(f"Local machine time: {datetime.datetime.now()}")
-    print(f"IST time (used for market hours): {now_ist()}")
+    log("LIFECYCLE", f"Trading engine started. IST time: {now_ist()}")
 
     instrument_states = {name: {"last_candle_ts": None} for name in config.INSTRUMENTS}
     poll_seconds = config.TIMING["ENGINE_POLL_INTERVAL_SECONDS"]
@@ -353,9 +360,9 @@ def main():
         if not market_open_now:
             if market_was_open is not False:
                 if current_time < config.TIMING["MARKET_OPEN"]:
-                    print(f"Market not open yet ({current_time}). Waiting...")
+                    log("LIFECYCLE", f"Market not open yet ({current_time}). Waiting...")
                 else:
-                    print("Market closed for the day. Waiting for next session...")
+                    log("LIFECYCLE", "Market closed for the day. Waiting for next session...")
             market_was_open = False
             time.sleep(poll_seconds)
             continue

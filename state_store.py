@@ -108,6 +108,13 @@ def init_db():
                 handled INTEGER NOT NULL DEFAULT 0
             );
 
+            CREATE TABLE IF NOT EXISTS activity_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                message TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS spot_quotes (
                 instrument TEXT PRIMARY KEY,
                 last_price REAL NOT NULL,
@@ -486,6 +493,31 @@ def is_engine_alive(stale_after_seconds=90):
     return (datetime.datetime.now() - last).total_seconds() <= stale_after_seconds
 
 
+# --------------------------------------------------------------------- activity_log
+
+def log_event(event_type, message):
+    conn = _connect()
+    try:
+        conn.execute(
+            "INSERT INTO activity_log (timestamp, event_type, message) VALUES (?, ?, ?)",
+            (_now_iso(), event_type, message),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_recent_activity(limit=100):
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM activity_log ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 # -------------------------------------------------------------------- spot_quotes
 
 def update_spot_quote(instrument, last_price, net_change, pct_change):
@@ -570,6 +602,7 @@ def get_dashboard_snapshot():
         "spot_quotes": get_spot_quotes(),
         "cumulative_pnl_stats": get_cumulative_pnl_stats(),
         "risk_state": get_risk_state(),
+        "activity_log": get_recent_activity(limit=100),
     }
 
 
