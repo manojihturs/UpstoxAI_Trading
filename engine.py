@@ -5,8 +5,9 @@ Long-running backend for the semi-automatic paper trading dashboard.
 Every ENGINE_POLL_INTERVAL_SECONDS it:
   1. Manages the single open position (if any): polls live premium, updates
      the trailing stop, and exits on SL/TSL/target/EOD square-off.
-  2. Otherwise scans Nifty/BankNifty/Sensex for a new EMA/ADX signal
-     (signal_engine.py -- same code path as paper_trader.py) and, if one
+  2. Otherwise scans Nifty/BankNifty/Sensex for a new signal, using
+     whichever strategy is currently active (strategies.py -- switchable
+     live from the dashboard dropdown, no restart needed) and, if one
      fires, writes a PENDING signal for the dashboard to show. It does NOT
      open a position on its own -- that requires a user confirmation.
   3. Picks up user confirm/reject/reset requests written by dashboard.py.
@@ -29,10 +30,12 @@ import config
 import state_store
 import cost_model
 import trade_export
-from signal_engine import compute_indicators, get_signal, confirm_with_pcr, confirm_with_trend_filter, _ema
+import strategies
+from signal_engine import compute_indicators, confirm_with_pcr
 from option_selector import (
     get_access_token, get_atm_option, get_intraday_candles, get_live_ltp,
     get_nearest_weekly_expiry, get_option_chain, compute_pcr, get_quotes,
+    get_previous_trading_day_ohlc,
 )
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -189,10 +192,31 @@ def refresh_spot_quotes(headers):
 
 # ------------------------------------------------------------- signal scan
 
+def get_cached_prev_day_ohlc(instrument_states, name, cfg, headers):
+    """Previous trading day's H/L/C, needed by the pivot-point strategy.
+    Fetched once per calendar day per instrument and cached -- it doesn't
+    change intraday, so no need to hit the API every poll cycle."""
+    state = instrument_states[name]
+    today = datetime.date.today()
+    if state.get("pivot_date") == today and state.get("prev_day_ohlc") is not None:
+        return state["prev_day_ohlc"]
+    try:
+        ohlc = get_previous_trading_day_ohlc(cfg["spot_instrument_key"], headers)
+        state["prev_day_ohlc"] = ohlc
+        state["pivot_date"] = today
+        return ohlc
+    except Exception as e:
+        print(f"{name}: failed to fetch previous-day OHLC for pivot point: {e}")
+        return state.get("prev_day_ohlc")  # fall back to yesterday's cached value if any
+
+
 def scan_for_signal(instrument_states, headers):
-    """Look for a new candle-close signal on each flat instrument, in turn.
+    """Look for a new candle-close signal on each flat instrument, in turn,
+    using whichever strategy is currently active (dashboard-selectable).
     Only one instrument's signal is proposed per cycle (single-position
     design) -- the rest are simply reconsidered next cycle if still flat."""
+    active_strategy = state_store.get_active_strategy()
+
     for name, cfg in config.INSTRUMENTS.items():
         state = instrument_states[name]
         try:
@@ -205,23 +229,16 @@ def scan_for_signal(instrument_states, headers):
             continue
 
         df = compute_indicators(candles)
-        if config.STRATEGY["ENABLE_TREND_FILTER"]:
-            ema_period = config.STRATEGY["TREND_FILTER_EMA_PERIOD"]
-            df[f"EMA{ema_period}"] = _ema(df["close"], ema_period)
+        prev_day_ohlc = get_cached_prev_day_ohlc(instrument_states, name, cfg, headers)
+        df = strategies.prepare_columns(df, prev_day_ohlc=prev_day_ohlc)
         latest = df.iloc[-1]
         if state["last_candle_ts"] == latest["timestamp"]:
             continue
         state["last_candle_ts"] = latest["timestamp"]
 
-        signal = get_signal(latest)
+        signal = strategies.get_signal_for_strategy(active_strategy, latest)
         if signal not in ("CE", "PE"):
             continue
-
-        if config.STRATEGY["ENABLE_TREND_FILTER"]:
-            ema_period = config.STRATEGY["TREND_FILTER_EMA_PERIOD"]
-            if not confirm_with_trend_filter(signal, latest["close"], latest[f"EMA{ema_period}"]):
-                print(f"{name}: {signal} signal rejected by trend filter (close vs EMA{ema_period})")
-                continue
 
         if config.PCR["ENABLE_PCR_CONFIRMATION"]:
             try:
@@ -245,7 +262,8 @@ def scan_for_signal(instrument_states, headers):
         qty = cfg["lot_size"]
         state_store.create_pending_signal(name, signal, opt["strike"], opt["expiry"], opt["instrument_key"],
                                            opt["ltp"], qty, config.TIMING["PENDING_SIGNAL_TTL_SECONDS"])
-        log("SIGNAL", f"SIGNAL: {name} {signal} strike={opt['strike']} ltp={opt['ltp']} -- awaiting confirmation")
+        log("SIGNAL", f"SIGNAL ({active_strategy}): {name} {signal} strike={opt['strike']} "
+                       f"ltp={opt['ltp']} -- awaiting confirmation")
         return  # single-position design: stop scanning once one signal is proposed
 
 
@@ -331,6 +349,11 @@ def process_control_requests(headers, today):
             elif req["kind"] == "RESET_CUMULATIVE_BREAKER":
                 state_store.reset_cumulative_breaker()
                 log("BREAKER", "Cumulative drawdown breaker manually reset.")
+            elif req["kind"] == "SET_STRATEGY":
+                new_strategy = req["payload"]["strategy"]
+                state_store.set_active_strategy(new_strategy)
+                label = strategies.STRATEGIES.get(new_strategy, {}).get("label", new_strategy)
+                log("STRATEGY", f"Active strategy switched to {new_strategy}: {label}")
         except Exception as e:
             print(f"ERROR handling control request {req['id']} ({req['kind']}): {e}")
         state_store.mark_control_request_handled(req["id"])

@@ -27,6 +27,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import config
 import state_store
 import engine
+import strategies
 
 st.set_page_config(page_title="Paper Trading Dashboard", layout="wide")
 
@@ -69,13 +70,32 @@ col_title, col_status = st.columns([4, 1])
 with col_title:
     st.title("Paper Trading -- Nifty / BankNifty / Sensex")
     st.caption("Semi-automatic. Paper money only. No real orders are ever placed.")
-    trend_filter_status = "ON (EMA50 trend filter)" if config.STRATEGY["ENABLE_TREND_FILTER"] else "OFF (baseline EMA9/20 cross only)"
-    st.caption(f"Strategy: {trend_filter_status}")
 with col_status:
     if snapshot["engine_alive"]:
         st.success("Engine: running")
     else:
         st.warning("Engine: starting...")
+
+# ------------------------------------------------------------ strategy picker
+st.subheader("Active Strategy")
+strategy_keys = list(strategies.STRATEGIES.keys())
+strategy_labels = [strategies.STRATEGIES[k]["label"] for k in strategy_keys]
+current_strategy = snapshot["active_strategy"]
+current_index = strategy_keys.index(current_strategy) if current_strategy in strategy_keys else 0
+
+chosen_label = st.selectbox(
+    "Signal strategy engine.py uses for new entries (switches immediately, no restart needed):",
+    strategy_labels, index=current_index,
+)
+chosen_key = strategy_keys[strategy_labels.index(chosen_label)]
+if chosen_key != current_strategy:
+    state_store.create_control_request("SET_STRATEGY", {"strategy": chosen_key})
+    st.rerun()
+st.caption(
+    "Changing this only affects NEW signals from now on -- an already-open position keeps "
+    "running under whatever strategy proposed it. Backtest each option in "
+    "backtest_experiments.py before trusting it; win rates vary a lot between them."
+)
 
 st.divider()
 

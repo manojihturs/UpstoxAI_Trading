@@ -84,6 +84,22 @@ def compute_realized_vol(df):
     return vol.shift(1)  # shift again so today's decision never sees today's own return
 
 
+def add_pivot_column(df):
+    """Per-day pivot point (PP), computed from each COMPLETE trading day's
+    High/Low/Close and shifted so every row on a given day sees the PREVIOUS
+    day's pivot -- matching how strategies.signal_pivot_point expects it.
+    Backtest-only: live usage instead passes a single scalar prev_day_ohlc
+    into strategies.prepare_columns() since it only needs today's value."""
+    df = df.copy()
+    df["_date"] = df["timestamp"].dt.date
+    daily = df.groupby("_date").agg(day_high=("high", "max"), day_low=("low", "min"), day_close=("close", "last"))
+    daily["pivot_pp"] = (daily["day_high"] + daily["day_low"] + daily["day_close"]) / 3
+    daily["pivot_pp"] = daily["pivot_pp"].shift(1)  # today's rows use YESTERDAY's pivot
+    df = df.merge(daily["pivot_pp"], left_on="_date", right_index=True, how="left")
+    df["prev_close"] = df["close"].shift(1)
+    return df.drop(columns=["_date"])
+
+
 def backtest_instrument(name, csv_path, cfg):
     df = pd.read_csv(csv_path, parse_dates=["timestamp"])
     df = compute_indicators(df)
@@ -155,6 +171,117 @@ def backtest_instrument(name, csv_path, cfg):
         entry_net = cost_model.apply_slippage(entry_raw, "BUY")
         position = {
             "entry_time": row["timestamp"],
+            "direction": signal,
+            "strike": strike,
+            "entry_ltp_net": entry_net,
+            "current_sl": entry_net - sl_points,
+            "tsl_armed": False,
+            "target_price": entry_net + cfg["target_points"],
+        }
+
+    return trades
+
+
+def prepare_instrument_df(name, csv_path):
+    """Shared prep step (indicators, optional EMA50, realized vol) used by
+    both the single-instrument and portfolio-level backtests."""
+    df = pd.read_csv(csv_path, parse_dates=["timestamp"])
+    df = compute_indicators(df)
+    if config.STRATEGY["ENABLE_TREND_FILTER"]:
+        ema_period = config.STRATEGY["TREND_FILTER_EMA_PERIOD"]
+        df[f"EMA{ema_period}"] = _ema(df["close"], ema_period)
+    df["realized_vol"] = compute_realized_vol(df)
+    df = df.dropna(subset=["realized_vol"]).reset_index(drop=True)
+    df["instrument"] = name
+    return df
+
+
+def backtest_portfolio(max_concurrent):
+    """Merges all instruments into one chronological stream and enforces a
+    SHARED position cap across all of them -- unlike backtest_instrument(),
+    which runs each instrument fully independently (implicitly unlimited
+    concurrency). max_concurrent=1 reproduces what's actually live today
+    (single position across all instruments); higher values simulate
+    relaxing that constraint."""
+    prepared = {
+        name: prepare_instrument_df(name, CSV_FILES[name])
+        for name in config.INSTRUMENTS
+        if os.path.exists(CSV_FILES[name])
+    }
+
+    all_rows = []
+    for name, df in prepared.items():
+        for _, row in df.iterrows():
+            all_rows.append((row["timestamp"], name, row))
+    all_rows.sort(key=lambda x: x[0])
+
+    years_to_expiry = ASSUMED_DAYS_TO_EXPIRY / 365
+    open_positions = {}  # instrument -> position dict
+    trades = []
+
+    for ts, name, row in all_rows:
+        cfg = config.INSTRUMENTS[name]
+        current_time = ts.time()
+        spot = row["close"]
+        sigma = row["realized_vol"]
+
+        if name in open_positions:
+            position = open_positions[name]
+            option_price = black_scholes_price(
+                spot, position["strike"], years_to_expiry, RISK_FREE_RATE, sigma, position["direction"]
+            )
+            new_sl, new_tsl_armed, exit_reason = evaluate_position(position, option_price, current_time, cfg)
+            position["current_sl"] = new_sl
+            position["tsl_armed"] = new_tsl_armed
+
+            if exit_reason:
+                exit_net = cost_model.apply_slippage(option_price, "SELL")
+                qty = cfg["lot_size"]
+                gross_pnl = (exit_net - position["entry_ltp_net"]) * qty
+                costs_total = cost_model.compute_round_trip_costs(
+                    position["entry_ltp_net"], exit_net, qty, cfg["exchange"]
+                )
+                net_pnl = gross_pnl - costs_total
+                trades.append({
+                    "instrument": name,
+                    "entry_time": position["entry_time"],
+                    "exit_time": ts,
+                    "direction": position["direction"],
+                    "strike": position["strike"],
+                    "entry_premium": position["entry_ltp_net"],
+                    "exit_premium": exit_net,
+                    "exit_reason": exit_reason,
+                    "gross_pnl": gross_pnl,
+                    "costs_total": costs_total,
+                    "net_pnl": net_pnl,
+                })
+                del open_positions[name]
+            continue
+
+        if len(open_positions) >= max_concurrent:
+            continue  # at the shared cap -- skip this signal, same as engine.py's single-position gate
+
+        signal = get_signal(row)
+        if signal not in ("CE", "PE"):
+            continue
+
+        if config.STRATEGY["ENABLE_TREND_FILTER"]:
+            ema_period = config.STRATEGY["TREND_FILTER_EMA_PERIOD"]
+            if not confirm_with_trend_filter(signal, row["close"], row[f"EMA{ema_period}"]):
+                continue
+
+        strike = round_to_atm(spot, cfg["strike_step"])
+        entry_raw = black_scholes_price(spot, strike, years_to_expiry, RISK_FREE_RATE, sigma, signal)
+        if entry_raw <= 0:
+            continue
+
+        sl_points = compute_sl_points(name, entry_raw)
+        if sl_points is None:
+            continue
+
+        entry_net = cost_model.apply_slippage(entry_raw, "BUY")
+        open_positions[name] = {
+            "entry_time": ts,
             "direction": signal,
             "strike": strike,
             "entry_ltp_net": entry_net,

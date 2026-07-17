@@ -1,25 +1,26 @@
 """
 backtest_experiments.py
-Tests a handful of well-reasoned rule variations against the baseline
-(the rules actually live in config.py/signal_engine.py today), using a
-strict chronological TRAIN/TEST split -- variants are only worth trusting
-if they hold up on data they were never checked against. This does NOT
-modify signal_engine.py (the live contract stays untouched); each variant
-reimplements just the entry-decision step on top of the same indicator
-columns compute_indicators() already produces.
+Compares all 5 named strategies in strategies.py against a strict
+chronological TRAIN/TEST split -- a strategy is only worth trusting if it
+holds up on data it was never checked against. Uses the exact same
+strategy functions engine.py dispatches live (strategies.py), so this is a
+genuine comparison of what's selectable in the dashboard dropdown, not a
+lookalike reimplementation.
 
-Nothing here changes live behavior. It's a research report, not a
-deployment -- adopting any variant means deliberately editing config.py.
+Nothing here changes live behavior by itself -- it's a research report.
+Switching the active strategy is done via the dashboard or
+config.STRATEGY_STATE.
 """
 import os
 import pandas as pd
 
 import config
 import cost_model
-from signal_engine import compute_indicators, _ema, ADX_THRESHOLD, LAST_ENTRY_TIME
+import strategies
+from signal_engine import compute_indicators
 from option_selector import round_to_atm
 from engine import evaluate_position, compute_sl_points
-from backtest import black_scholes_price, compute_realized_vol, CSV_FILES, ASSUMED_DAYS_TO_EXPIRY, RISK_FREE_RATE
+from backtest import black_scholes_price, compute_realized_vol, add_pivot_column, CSV_FILES, ASSUMED_DAYS_TO_EXPIRY, RISK_FREE_RATE
 
 TRAIN_TEST_SPLIT_DATE = "2025-07-01"  # ~2.5yr train / ~1yr test, chronological (no shuffling)
 
@@ -27,75 +28,14 @@ TRAIN_TEST_SPLIT_DATE = "2025-07-01"  # ~2.5yr train / ~1yr test, chronological 
 def prepare_df(csv_path):
     df = pd.read_csv(csv_path, parse_dates=["timestamp"])
     df = compute_indicators(df)
-    df["EMA50"] = _ema(df["close"], 50)
+    df = add_pivot_column(df)              # adds pivot_pp, prev_close (backtest-specific)
+    df = strategies.prepare_columns(df)     # adds EMA50, bull/bear_cross_prev (overwrites prev_close identically)
     df["realized_vol"] = compute_realized_vol(df)
-    df = df.dropna(subset=["realized_vol", "EMA50"]).reset_index(drop=True)
-    df["bull_cross_prev"] = df["bull_cross"].shift(1).fillna(False)
-    df["bear_cross_prev"] = df["bear_cross"].shift(1).fillna(False)
+    df = df.dropna(subset=["realized_vol"]).reset_index(drop=True)
     return df
 
 
-def signal_baseline(row):
-    """Exactly what's live today: EMA9/EMA20 cross + ADX > 12."""
-    t = row["timestamp"].time()
-    if t > LAST_ENTRY_TIME or row["ADX"] <= ADX_THRESHOLD:
-        return None
-    if row["bull_cross"]:
-        return "CE"
-    if row["bear_cross"]:
-        return "PE"
-    return None
-
-
-def signal_stricter_adx(row, threshold=20):
-    """Variant B: raise the trend-strength bar from 12 to 20 -- fewer,
-    theoretically higher-conviction signals."""
-    t = row["timestamp"].time()
-    if t > LAST_ENTRY_TIME or row["ADX"] <= threshold:
-        return None
-    if row["bull_cross"]:
-        return "CE"
-    if row["bear_cross"]:
-        return "PE"
-    return None
-
-
-def signal_higher_tf_filter(row):
-    """Variant C: only take the EMA9/20 cross if price also agrees with
-    the longer EMA50 trend -- filters counter-trend whipsaws."""
-    t = row["timestamp"].time()
-    if t > LAST_ENTRY_TIME or row["ADX"] <= ADX_THRESHOLD:
-        return None
-    if row["bull_cross"] and row["close"] > row["EMA50"]:
-        return "CE"
-    if row["bear_cross"] and row["close"] < row["EMA50"]:
-        return "PE"
-    return None
-
-
-def signal_confirmation_candle(row):
-    """Variant D: don't enter on the cross candle itself -- wait one more
-    candle and only enter if the trend direction still holds. Cuts
-    single-candle whipsaws at the cost of a slightly worse entry price."""
-    t = row["timestamp"].time()
-    if t > LAST_ENTRY_TIME or row["ADX"] <= ADX_THRESHOLD:
-        return None
-    if row["bull_cross_prev"] and row["ema_diff"] > 0:
-        return "CE"
-    if row["bear_cross_prev"] and row["ema_diff"] < 0:
-        return "PE"
-    return None
-
-
-VARIANTS = {
-    "A_baseline_live_today": signal_baseline,
-    "B_stricter_adx_20": signal_stricter_adx,
-    "C_higher_tf_ema50_filter": signal_higher_tf_filter,
-    "D_confirmation_candle": signal_confirmation_candle,
-}
-
-
-def run_variant(signal_fn, df, instrument_name, cfg):
+def run_strategy(strategy_name, df, instrument_name, cfg):
     years_to_expiry = ASSUMED_DAYS_TO_EXPIRY / 365
     trades = []
     position = None
@@ -127,7 +67,7 @@ def run_variant(signal_fn, df, instrument_name, cfg):
                 position = None
             continue
 
-        signal = signal_fn(row)
+        signal = strategies.get_signal_for_strategy(strategy_name, row)
         if signal not in ("CE", "PE"):
             continue
 
@@ -170,7 +110,7 @@ def main():
     }
 
     results = []
-    for variant_name, signal_fn in VARIANTS.items():
+    for strategy_name in strategies.STRATEGIES:
         train_trades, test_trades = [], []
         for instrument_name, cfg in config.INSTRUMENTS.items():
             if instrument_name not in prepared:
@@ -179,11 +119,13 @@ def main():
             train_df = df[df["timestamp"] < TRAIN_TEST_SPLIT_DATE]
             test_df = df[df["timestamp"] >= TRAIN_TEST_SPLIT_DATE]
 
-            train_trades += run_variant(signal_fn, train_df, instrument_name, cfg)
-            test_trades += run_variant(signal_fn, test_df, instrument_name, cfg)
+            train_trades += run_strategy(strategy_name, train_df, instrument_name, cfg)
+            test_trades += run_strategy(strategy_name, test_df, instrument_name, cfg)
 
-        results.append(summarize(train_trades, f"{variant_name} [TRAIN <{TRAIN_TEST_SPLIT_DATE}]"))
-        results.append(summarize(test_trades, f"{variant_name} [TEST >={TRAIN_TEST_SPLIT_DATE}]"))
+        label = strategies.STRATEGIES[strategy_name]["label"]
+        results.append(summarize(train_trades, f"{strategy_name} [TRAIN <{TRAIN_TEST_SPLIT_DATE}]"))
+        results.append(summarize(test_trades, f"{strategy_name} [TEST >={TRAIN_TEST_SPLIT_DATE}]"))
+        print(f"{strategy_name}: {label}")
 
     out = pd.DataFrame(results)
     print(out.to_string(index=False))

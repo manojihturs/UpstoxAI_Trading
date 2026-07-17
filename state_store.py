@@ -88,6 +88,11 @@ def init_db():
                 tripped_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS strategy_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                active_strategy TEXT NOT NULL DEFAULT 'EMA50_TREND_FILTER'
+            );
+
             CREATE TABLE IF NOT EXISTS risk_state (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 cumulative_breaker_tripped INTEGER NOT NULL DEFAULT 0,
@@ -461,6 +466,34 @@ def reset_cumulative_breaker():
         conn.close()
 
 
+# ------------------------------------------------------------- strategy_state
+
+def get_active_strategy():
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT * FROM strategy_state WHERE id = 1").fetchone()
+        if row is None:
+            conn.execute("INSERT INTO strategy_state (id, active_strategy) VALUES (1, 'EMA50_TREND_FILTER')")
+            conn.commit()
+            return "EMA50_TREND_FILTER"
+        return row["active_strategy"]
+    finally:
+        conn.close()
+
+
+def set_active_strategy(strategy_name):
+    conn = _connect()
+    try:
+        conn.execute(
+            "INSERT INTO strategy_state (id, active_strategy) VALUES (1, ?) "
+            "ON CONFLICT(id) DO UPDATE SET active_strategy = excluded.active_strategy",
+            (strategy_name,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------- engine_heartbeat
 
 def update_heartbeat(pid):
@@ -603,6 +636,7 @@ def get_dashboard_snapshot():
         "cumulative_pnl_stats": get_cumulative_pnl_stats(),
         "risk_state": get_risk_state(),
         "activity_log": get_recent_activity(limit=100),
+        "active_strategy": get_active_strategy(),
     }
 
 
