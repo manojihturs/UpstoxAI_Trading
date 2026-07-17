@@ -74,6 +74,18 @@ RISK = {
     "MAX_CUMULATIVE_DRAWDOWN": 15000,  # rupees; 30% of CAPITAL above
 }
 
+# ---- Auto-confirm ----
+# Off by default -- this is the core safety design of the whole app: a
+# signal proposes, a human confirms, THEN it becomes a real (paper)
+# position. Turning this on removes that human check entirely -- every
+# signal that fires opens a position immediately and automatically, with
+# no review window. Live-switchable from the dashboard (a toggle, not
+# buried in code) via state_store.get/set_auto_confirm(), same pattern as
+# the strategy/timeframe dropdowns.
+AUTO_CONFIRM = {
+    "ENABLED": False,
+}
+
 # ---- Costs (retail discount-broker assumptions; approximate, tune as needed) ----
 COSTS = {
     "BROKERAGE_FLAT": 20.0,        # rupees per executed order

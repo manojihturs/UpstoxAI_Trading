@@ -28,6 +28,7 @@ import config
 import state_store
 import engine
 import strategies
+import cost_model
 
 st.set_page_config(page_title="Paper Trading Dashboard", layout="wide")
 
@@ -146,6 +147,39 @@ st.caption(
     "-- anything else is genuinely untested live behavior, not a validated variant."
 )
 
+# --------------------------------------------------------------- auto-confirm
+current_auto_confirm = snapshot["auto_confirm"]
+
+if st.session_state.get("_last_known_auto_confirm") != current_auto_confirm:
+    st.session_state["auto_confirm_toggle"] = current_auto_confirm
+    st.session_state["_last_known_auto_confirm"] = current_auto_confirm
+
+
+def _on_auto_confirm_change():
+    chosen = st.session_state["auto_confirm_toggle"]
+    state_store.create_control_request("SET_AUTO_CONFIRM", {"enabled": chosen})
+    st.session_state["_last_known_auto_confirm"] = chosen
+
+
+st.toggle(
+    "Auto-confirm signals (skip manual review)",
+    key="auto_confirm_toggle", on_change=_on_auto_confirm_change,
+)
+if current_auto_confirm:
+    st.error(
+        "🔴 AUTO-CONFIRM IS ON. Every signal that fires opens a paper position immediately, "
+        "with no review window -- the Confirm/Reject step you've been using is bypassed "
+        "entirely. All the same risk controls (SL/TSL/daily cap/cumulative breaker) still "
+        "apply once a position is open; what's gone is your chance to look at a signal "
+        "before it becomes a trade."
+    )
+else:
+    st.caption(
+        "Off by default -- this is the core safety design of the app: a signal proposes, "
+        "you confirm, then it becomes a (paper) position. Turning this on removes that "
+        "human check entirely."
+    )
+
 st.divider()
 
 # ------------------------------------------------------------- spot quotes
@@ -244,7 +278,19 @@ if pending is None:
     st.info("No signal awaiting confirmation right now.")
 else:
     sl_points = engine.compute_sl_points(pending["instrument"], pending["proposed_ltp"])
-    worst_case = f"Rs {sl_points * pending['qty']:,.2f}" if sl_points is not None else "N/A (will be rejected on confirm)"
+    if sl_points is not None:
+        # sl_points*qty is only the price-movement portion of the risk
+        # budget -- compute_sl_points already sizes it net of estimated
+        # round-trip costs, so the HONEST worst-case total also needs
+        # those costs added back, or this understates what a real SL hit
+        # actually costs (found live: a signal showing ~Rs440 here
+        # actually costs ~Rs500 all-in before any overshoot).
+        est_costs = cost_model.estimate_round_trip_costs(
+            pending["proposed_ltp"], pending["qty"], config.INSTRUMENTS[pending["instrument"]]["exchange"]
+        )
+        worst_case = f"Rs {sl_points * pending['qty'] + est_costs:,.2f} (incl. ~Rs {est_costs:,.0f} est. costs)"
+    else:
+        worst_case = "N/A (will be rejected on confirm)"
 
     c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1])
     c1.metric("Instrument", pending["instrument"])

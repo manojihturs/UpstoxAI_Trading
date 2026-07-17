@@ -210,11 +210,15 @@ def get_cached_prev_day_ohlc(instrument_states, name, cfg, headers):
         return state.get("prev_day_ohlc")  # fall back to yesterday's cached value if any
 
 
-def scan_for_signal(instrument_states, headers):
+def scan_for_signal(instrument_states, headers, today):
     """Look for a new candle-close signal on each flat instrument, in turn,
     using whichever strategy is currently active (dashboard-selectable).
     Only one instrument's signal is proposed per cycle (single-position
-    design) -- the rest are simply reconsidered next cycle if still flat."""
+    design) -- the rest are simply reconsidered next cycle if still flat.
+    If auto-confirm is on, the freshly-created pending signal is confirmed
+    immediately via the exact same handle_confirm() path a manual click
+    uses -- no separate "auto-entry" logic, so it can never diverge from
+    what a manual confirm does."""
     active_strategy = state_store.get_active_strategy()
     active_timeframe = state_store.get_active_timeframe()
 
@@ -261,10 +265,16 @@ def scan_for_signal(instrument_states, headers):
             continue
 
         qty = cfg["lot_size"]
-        state_store.create_pending_signal(name, signal, opt["strike"], opt["expiry"], opt["instrument_key"],
-                                           opt["ltp"], qty, config.TIMING["PENDING_SIGNAL_TTL_SECONDS"])
+        signal_id = state_store.create_pending_signal(
+            name, signal, opt["strike"], opt["expiry"], opt["instrument_key"],
+            opt["ltp"], qty, config.TIMING["PENDING_SIGNAL_TTL_SECONDS"])
         log("SIGNAL", f"SIGNAL ({active_strategy}, {active_timeframe}min): {name} {signal} "
                        f"strike={opt['strike']} ltp={opt['ltp']} -- awaiting confirmation")
+
+        if state_store.get_auto_confirm():
+            log("AUTO_CONFIRM", f"Auto-confirm is ON -- confirming signal {signal_id} immediately.")
+            handle_confirm(signal_id, headers, today)
+
         return  # single-position design: stop scanning once one signal is proposed
 
 
@@ -360,6 +370,12 @@ def process_control_requests(headers, today):
                 state_store.set_active_timeframe(new_minutes)
                 log("TIMEFRAME", f"Active candle timeframe switched to {new_minutes}min "
                                   f"(UNTESTED at this timeframe -- backtests only cover 15min)")
+            elif req["kind"] == "SET_AUTO_CONFIRM":
+                enabled = req["payload"]["enabled"]
+                state_store.set_auto_confirm(enabled)
+                state_text = "ON -- new signals will open a paper position immediately, no manual review" \
+                    if enabled else "OFF -- back to manual confirm for every signal"
+                log("AUTO_CONFIRM", f"Auto-confirm switched {state_text}")
         except Exception as e:
             print(f"ERROR handling control request {req['id']} ({req['kind']}): {e}")
         state_store.mark_control_request_handled(req["id"])
@@ -413,7 +429,7 @@ def main():
                 cumulative_tripped = check_cumulative_drawdown_breaker()
                 if (not pending and not summary["circuit_breaker_tripped"] and not cumulative_tripped
                         and current_time <= config.TIMING["LAST_ENTRY_TIME"]):
-                    scan_for_signal(instrument_states, headers)
+                    scan_for_signal(instrument_states, headers, today)
         except Exception as e:
             print(f"ERROR in engine loop: {e}")
 
