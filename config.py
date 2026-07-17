@@ -59,6 +59,33 @@ RISK = {
     "CAPITAL": 50000,                 # rupees; informational only, not enforced as margin here
     "MAX_TRADES_BUDGET_DIVISOR": 4,   # sub-divides DAILY_LOSS_CAP across potential trades/day
     "SINGLE_POSITION_ONLY": True,     # only one open position across all instruments at a time
+
+    # Off by default. The daily cap above only limits loss WITHIN a single
+    # day and resets every morning -- it does nothing to stop a losing
+    # streak that compounds across many days/weeks (backtest.py found a
+    # ~1-year stretch where cumulative P&L stayed below -Rs 50,000, the
+    # full stated capital, well before it eventually recovered). This
+    # breaker tracks all-time cumulative P&L vs. its running peak and
+    # blocks ALL new entries once the drawdown from that peak exceeds
+    # MAX_CUMULATIVE_DRAWDOWN. Unlike the daily breaker it does NOT
+    # auto-reset -- once tripped it requires a manual reset, since the
+    # point is to force a real pause, not silently resume on a small uptick.
+    "ENABLE_CUMULATIVE_DRAWDOWN_BREAKER": True,
+    "MAX_CUMULATIVE_DRAWDOWN": 15000,  # rupees; 30% of CAPITAL above
+}
+
+# ---- Auto-confirm ----
+# ON by default per explicit request: every signal that fires opens a
+# (paper) position immediately, with no manual review window. This
+# removes the human-confirms-first check that was this app's original
+# safety design -- a deliberate choice for paper trading, not something
+# to carry over unquestioned if this project ever moves toward real
+# money. Live-switchable from the dashboard toggle at any time via
+# state_store.get/set_auto_confirm(), same pattern as the
+# strategy/timeframe dropdowns -- turning it back off does not require
+# a code change.
+AUTO_CONFIRM = {
+    "ENABLED": True,
 }
 
 # ---- Costs (retail discount-broker assumptions; approximate, tune as needed) ----
@@ -85,6 +112,36 @@ PCR = {
     "ENABLE_PCR_CONFIRMATION": False,
     "BULLISH_MIN": 1.1,   # PCR >= this confirms CE (bullish)
     "BEARISH_MAX": 0.9,   # PCR <= this confirms PE (bearish)
+}
+
+# ---- Trend filter confirmation (signal_engine.confirm_with_trend_filter) ----
+# "Variant C" from backtest_experiments.py: only take the EMA9/EMA20 cross if
+# price also agrees with a longer EMA. The only variant tested there that
+# improved results on both a training window and a held-out window it never
+# saw -- still off by default so you can compare it against the baseline
+# live before trusting it. Flip ENABLE_TREND_FILTER to True to turn it on;
+# used identically by engine.py (live) and backtest.py (so they never diverge).
+STRATEGY = {
+    "ENABLE_TREND_FILTER": True,
+    "TREND_FILTER_EMA_PERIOD": 50,
+}
+
+# ---- Candle timeframe ----
+# Live-switchable from the dashboard (state_store.get/set_active_timeframe),
+# same pattern as the strategy dropdown -- no restart needed. All 6 options
+# verified directly against Upstox's intraday API before being listed here.
+#
+# IMPORTANT: every strategy's periods (EMA9/20/50, ADX14, pivot, UT Bot's
+# ATR10/14) were chosen and backtested assuming 15-min candles. Switching
+# timeframe does NOT rescale those periods -- EMA20 on 1-min candles is a
+# 20-*minute* trend instead of a 5-*hour* one, a fundamentally different
+# sensitivity, not just "the same strategy, checked more often." There is
+# no backtest data for any timeframe other than 15-min in this repo
+# (nifty50_15min.csv etc.) -- switching live to another timeframe is
+# running genuinely untested behavior.
+TIMEFRAME = {
+    "AVAILABLE_MINUTES": [1, 3, 5, 15, 30, 60],
+    "DEFAULT_MINUTES": 15,
 }
 
 # ---- Timing ----

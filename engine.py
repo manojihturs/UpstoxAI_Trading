@@ -5,8 +5,9 @@ Long-running backend for the semi-automatic paper trading dashboard.
 Every ENGINE_POLL_INTERVAL_SECONDS it:
   1. Manages the single open position (if any): polls live premium, updates
      the trailing stop, and exits on SL/TSL/target/EOD square-off.
-  2. Otherwise scans Nifty/BankNifty/Sensex for a new EMA/ADX signal
-     (signal_engine.py -- same code path as paper_trader.py) and, if one
+  2. Otherwise scans Nifty/BankNifty/Sensex for a new signal, using
+     whichever strategy is currently active (strategies.py -- switchable
+     live from the dashboard dropdown, no restart needed) and, if one
      fires, writes a PENDING signal for the dashboard to show. It does NOT
      open a position on its own -- that requires a user confirmation.
   3. Picks up user confirm/reject/reset requests written by dashboard.py.
@@ -28,10 +29,13 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import config
 import state_store
 import cost_model
-from signal_engine import compute_indicators, get_signal, confirm_with_pcr
+import trade_export
+import strategies
+from signal_engine import compute_indicators, confirm_with_pcr
 from option_selector import (
     get_access_token, get_atm_option, get_intraday_candles, get_live_ltp,
     get_nearest_weekly_expiry, get_option_chain, compute_pcr, get_quotes,
+    get_previous_trading_day_ohlc,
 )
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -43,6 +47,14 @@ def now_ist():
 
 def get_headers():
     return {"Accept": "application/json", "Authorization": f"Bearer {get_access_token()}"}
+
+
+def log(event_type, message):
+    """Print (for the console/Monitor) AND persist to activity_log so the
+    dashboard can show a running log of what the engine has done, not just
+    its current snapshot state."""
+    print(message)
+    state_store.log_event(event_type, message)
 
 
 # ---------------------------------------------------------------- test mode
@@ -146,8 +158,14 @@ def manage_open_position(position, headers, current_time):
         net_pnl = gross_pnl - costs_total
         state_store.close_position(position["id"], raw_ltp, exit_net, exit_reason,
                                     gross_pnl, costs_total, net_pnl)
-        print(f"EXIT {exit_reason}: {position['instrument']} {position['direction']} "
-              f"{position['strike']} net_pnl={net_pnl:.2f}")
+        log("EXIT", f"EXIT {exit_reason}: {position['instrument']} {position['direction']} "
+                     f"{position['strike']} net_pnl={net_pnl:.2f}")
+
+        try:
+            closed = state_store.get_position_by_id(position["id"])
+            trade_export.append_closed_trade(closed)
+        except Exception as e:
+            print(f"WARNING: failed to append closed trade to Excel backup: {e}")
     else:
         print(f"Holding {position['instrument']} {position['direction']} {position['strike']} | "
               f"live={raw_ltp:.2f} sl={new_sl:.2f} tsl_armed={new_tsl_armed}")
@@ -174,14 +192,40 @@ def refresh_spot_quotes(headers):
 
 # ------------------------------------------------------------- signal scan
 
-def scan_for_signal(instrument_states, headers):
-    """Look for a new candle-close signal on each flat instrument, in turn.
+def get_cached_prev_day_ohlc(instrument_states, name, cfg, headers):
+    """Previous trading day's H/L/C, needed by the pivot-point strategy.
+    Fetched once per calendar day per instrument and cached -- it doesn't
+    change intraday, so no need to hit the API every poll cycle."""
+    state = instrument_states[name]
+    today = datetime.date.today()
+    if state.get("pivot_date") == today and state.get("prev_day_ohlc") is not None:
+        return state["prev_day_ohlc"]
+    try:
+        ohlc = get_previous_trading_day_ohlc(cfg["spot_instrument_key"], headers)
+        state["prev_day_ohlc"] = ohlc
+        state["pivot_date"] = today
+        return ohlc
+    except Exception as e:
+        print(f"{name}: failed to fetch previous-day OHLC for pivot point: {e}")
+        return state.get("prev_day_ohlc")  # fall back to yesterday's cached value if any
+
+
+def scan_for_signal(instrument_states, headers, today):
+    """Look for a new candle-close signal on each flat instrument, in turn,
+    using whichever strategy is currently active (dashboard-selectable).
     Only one instrument's signal is proposed per cycle (single-position
-    design) -- the rest are simply reconsidered next cycle if still flat."""
+    design) -- the rest are simply reconsidered next cycle if still flat.
+    If auto-confirm is on, the freshly-created pending signal is confirmed
+    immediately via the exact same handle_confirm() path a manual click
+    uses -- no separate "auto-entry" logic, so it can never diverge from
+    what a manual confirm does."""
+    active_strategy = state_store.get_active_strategy()
+    active_timeframe = state_store.get_active_timeframe()
+
     for name, cfg in config.INSTRUMENTS.items():
         state = instrument_states[name]
         try:
-            candles = get_intraday_candles(cfg["spot_instrument_key"], headers, interval_minutes=15)
+            candles = get_intraday_candles(cfg["spot_instrument_key"], headers, interval_minutes=active_timeframe)
         except Exception as e:
             print(f"{name}: failed to fetch candles: {e}")
             continue
@@ -190,12 +234,14 @@ def scan_for_signal(instrument_states, headers):
             continue
 
         df = compute_indicators(candles)
+        prev_day_ohlc = get_cached_prev_day_ohlc(instrument_states, name, cfg, headers)
+        df = strategies.prepare_columns(df, prev_day_ohlc=prev_day_ohlc)
         latest = df.iloc[-1]
         if state["last_candle_ts"] == latest["timestamp"]:
             continue
         state["last_candle_ts"] = latest["timestamp"]
 
-        signal = get_signal(latest)
+        signal = strategies.get_signal_for_strategy(active_strategy, latest)
         if signal not in ("CE", "PE"):
             continue
 
@@ -219,13 +265,41 @@ def scan_for_signal(instrument_states, headers):
             continue
 
         qty = cfg["lot_size"]
-        state_store.create_pending_signal(name, signal, opt["strike"], opt["expiry"], opt["instrument_key"],
-                                           opt["ltp"], qty, config.TIMING["PENDING_SIGNAL_TTL_SECONDS"])
-        print(f"SIGNAL: {name} {signal} strike={opt['strike']} ltp={opt['ltp']} -- awaiting confirmation")
+        signal_id = state_store.create_pending_signal(
+            name, signal, opt["strike"], opt["expiry"], opt["instrument_key"],
+            opt["ltp"], qty, config.TIMING["PENDING_SIGNAL_TTL_SECONDS"])
+        log("SIGNAL", f"SIGNAL ({active_strategy}, {active_timeframe}min): {name} {signal} "
+                       f"strike={opt['strike']} ltp={opt['ltp']} -- awaiting confirmation")
+
+        if state_store.get_auto_confirm():
+            log("AUTO_CONFIRM", f"Auto-confirm is ON -- confirming signal {signal_id} immediately.")
+            handle_confirm(signal_id, headers, today)
+
         return  # single-position design: stop scanning once one signal is proposed
 
 
 # -------------------------------------------------------- control requests
+
+def check_cumulative_drawdown_breaker():
+    """If enabled, trips (persists) the cumulative breaker the first time
+    all-time drawdown from its running peak exceeds MAX_CUMULATIVE_DRAWDOWN.
+    Once tripped it stays tripped until a manual reset -- see config.py for
+    why this doesn't auto-reset like the daily one. Returns True if new
+    entries should be blocked right now."""
+    if not config.RISK["ENABLE_CUMULATIVE_DRAWDOWN_BREAKER"]:
+        return False
+    state = state_store.get_risk_state()
+    if state["cumulative_breaker_tripped"]:
+        return True
+    stats = state_store.get_cumulative_pnl_stats()
+    if stats["drawdown"] <= -config.RISK["MAX_CUMULATIVE_DRAWDOWN"]:
+        state_store.trip_cumulative_breaker()
+        log("BREAKER", f"CUMULATIVE DRAWDOWN BREAKER TRIPPED: drawdown {stats['drawdown']:.2f} "
+                        f"breached -{config.RISK['MAX_CUMULATIVE_DRAWDOWN']}. Blocking new entries "
+                        f"until manually reset.")
+        return True
+    return False
+
 
 def handle_confirm(signal_id, headers, today):
     sig = state_store.get_pending_signal_by_id(signal_id)
@@ -239,20 +313,25 @@ def handle_confirm(signal_id, headers, today):
     summary = state_store.recompute_daily_summary(today, config.RISK["DAILY_LOSS_CAP"])
     if summary["circuit_breaker_tripped"]:
         state_store.set_pending_signal_status(signal_id, "REJECTED")
-        print(f"Confirm rejected for signal {signal_id}: daily circuit breaker is tripped")
+        log("REJECTED", f"Confirm rejected for signal {signal_id}: daily circuit breaker is tripped")
+        return
+
+    if check_cumulative_drawdown_breaker():
+        state_store.set_pending_signal_status(signal_id, "REJECTED")
+        log("REJECTED", f"Confirm rejected for signal {signal_id}: cumulative drawdown breaker is tripped")
         return
 
     if state_store.get_open_position():
         state_store.set_pending_signal_status(signal_id, "REJECTED")
-        print(f"Confirm rejected for signal {signal_id}: a position is already open")
+        log("REJECTED", f"Confirm rejected for signal {signal_id}: a position is already open")
         return
 
     raw_ltp = get_test_or_live_ltp(sig["instrument_key"], headers)
     sl_points = compute_sl_points(sig["instrument"], raw_ltp)
     if sl_points is None:
         state_store.set_pending_signal_status(signal_id, "REJECTED")
-        print(f"Confirm rejected for signal {signal_id}: risk budget can't support a safe "
-              f"stop at premium {raw_ltp}")
+        log("REJECTED", f"Confirm rejected for signal {signal_id}: risk budget can't support a safe "
+                         f"stop at premium {raw_ltp}")
         return
 
     entry_net = cost_model.apply_slippage(raw_ltp, "BUY")
@@ -263,8 +342,8 @@ def handle_confirm(signal_id, headers, today):
                                sig["instrument_key"], sig["qty"], raw_ltp, entry_net,
                                initial_sl, target_price)
     state_store.set_pending_signal_status(signal_id, "CONFIRMED")
-    print(f"ENTRY: {sig['instrument']} {sig['direction']} {sig['strike']} @ net {entry_net:.2f} "
-          f"(raw {raw_ltp:.2f}) SL={initial_sl:.2f} target={target_price:.2f}")
+    log("ENTRY", f"ENTRY: {sig['instrument']} {sig['direction']} {sig['strike']} @ net {entry_net:.2f} "
+                  f"(raw {raw_ltp:.2f}) SL={initial_sl:.2f} target={target_price:.2f}")
 
 
 def process_control_requests(headers, today):
@@ -274,9 +353,29 @@ def process_control_requests(headers, today):
                 handle_confirm(req["payload"]["signal_id"], headers, today)
             elif req["kind"] == "REJECT_SIGNAL":
                 state_store.set_pending_signal_status(req["payload"]["signal_id"], "REJECTED")
+                log("REJECTED", f"Signal {req['payload']['signal_id']} rejected by user.")
             elif req["kind"] == "RESET_BREAKER":
                 state_store.reset_circuit_breaker(today)
-                print("Circuit breaker manually reset (testing mode).")
+                log("BREAKER", "Daily circuit breaker manually reset (testing mode).")
+            elif req["kind"] == "RESET_CUMULATIVE_BREAKER":
+                state_store.reset_cumulative_breaker()
+                log("BREAKER", "Cumulative drawdown breaker manually reset.")
+            elif req["kind"] == "SET_STRATEGY":
+                new_strategy = req["payload"]["strategy"]
+                state_store.set_active_strategy(new_strategy)
+                label = strategies.STRATEGIES.get(new_strategy, {}).get("label", new_strategy)
+                log("STRATEGY", f"Active strategy switched to {new_strategy}: {label}")
+            elif req["kind"] == "SET_TIMEFRAME":
+                new_minutes = req["payload"]["minutes"]
+                state_store.set_active_timeframe(new_minutes)
+                log("TIMEFRAME", f"Active candle timeframe switched to {new_minutes}min "
+                                  f"(UNTESTED at this timeframe -- backtests only cover 15min)")
+            elif req["kind"] == "SET_AUTO_CONFIRM":
+                enabled = req["payload"]["enabled"]
+                state_store.set_auto_confirm(enabled)
+                state_text = "ON -- new signals will open a paper position immediately, no manual review" \
+                    if enabled else "OFF -- back to manual confirm for every signal"
+                log("AUTO_CONFIRM", f"Auto-confirm switched {state_text}")
         except Exception as e:
             print(f"ERROR handling control request {req['id']} ({req['kind']}): {e}")
         state_store.mark_control_request_handled(req["id"])
@@ -289,9 +388,7 @@ def main():
     works equally as a standalone process or as a background thread inside
     a long-lived host process (e.g. Streamlit Community Cloud, which has no
     separate worker process -- see ensure_background_thread())."""
-    print("Trading engine started.")
-    print(f"Local machine time: {datetime.datetime.now()}")
-    print(f"IST time (used for market hours): {now_ist()}")
+    log("LIFECYCLE", f"Trading engine started. IST time: {now_ist()}")
 
     instrument_states = {name: {"last_candle_ts": None} for name in config.INSTRUMENTS}
     poll_seconds = config.TIMING["ENGINE_POLL_INTERVAL_SECONDS"]
@@ -308,9 +405,9 @@ def main():
         if not market_open_now:
             if market_was_open is not False:
                 if current_time < config.TIMING["MARKET_OPEN"]:
-                    print(f"Market not open yet ({current_time}). Waiting...")
+                    log("LIFECYCLE", f"Market not open yet ({current_time}). Waiting...")
                 else:
-                    print("Market closed for the day. Waiting for next session...")
+                    log("LIFECYCLE", "Market closed for the day. Waiting for next session...")
             market_was_open = False
             time.sleep(poll_seconds)
             continue
@@ -329,9 +426,10 @@ def main():
             else:
                 summary = state_store.recompute_daily_summary(today, config.RISK["DAILY_LOSS_CAP"])
                 pending = state_store.get_pending_signal()
-                if (not pending and not summary["circuit_breaker_tripped"]
+                cumulative_tripped = check_cumulative_drawdown_breaker()
+                if (not pending and not summary["circuit_breaker_tripped"] and not cumulative_tripped
                         and current_time <= config.TIMING["LAST_ENTRY_TIME"]):
-                    scan_for_signal(instrument_states, headers)
+                    scan_for_signal(instrument_states, headers, today)
         except Exception as e:
             print(f"ERROR in engine loop: {e}")
 

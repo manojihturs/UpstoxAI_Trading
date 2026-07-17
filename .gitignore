@@ -2,9 +2,12 @@ upstox_token.txt
 trading_state.db
 trading_state.db-wal
 trading_state.db-shm
+trade_history.xlsx
+backtest_summary.json
 *.csv
 __pycache__/
 *.pyc
 .streamlit/
 .claude/
 .pytest_cache/
+.venv/

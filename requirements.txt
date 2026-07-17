@@ -3,4 +3,5 @@ pandas
 numpy
 streamlit
 streamlit-autorefresh
+openpyxl
 pytest

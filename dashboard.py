@@ -15,6 +15,7 @@ No real orders are placed anywhere in this app -- paper only.
 """
 import os
 import sys
+import json
 import datetime
 
 import pandas as pd
@@ -26,6 +27,8 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import config
 import state_store
 import engine
+import strategies
+import cost_model
 
 st.set_page_config(page_title="Paper Trading Dashboard", layout="wide")
 
@@ -50,7 +53,10 @@ def check_password():
     return False
 
 
-if not check_password():
+# Login is togglable via the 'require_login' secret so it can be turned
+# back on later without a code change. Defaults to True (safe default) if
+# the secret is unset, so a fresh deploy without this key stays protected.
+if st.secrets.get("require_login", True) and not check_password():
     st.stop()
 
 st_autorefresh(interval=5000, key="refresh")
@@ -70,6 +76,108 @@ with col_status:
         st.success("Engine: running")
     else:
         st.warning("Engine: starting...")
+
+# ------------------------------------------------------------ strategy picker
+st.subheader("Active Strategy")
+strategy_keys = list(strategies.STRATEGIES.keys())
+strategy_labels = [strategies.STRATEGIES[k]["label"] for k in strategy_keys]
+current_strategy = snapshot["active_strategy"]
+current_index = strategy_keys.index(current_strategy) if current_strategy in strategy_keys else 0
+
+# A selectbox with a `key` remembers the user's last pick across every
+# autorefresh rerun (Streamlit widget statefulness) -- comparing that
+# remembered value against the live DB value on every rerun (as an earlier
+# version of this did) means a stale browser tab keeps re-firing the SAME
+# stale choice every 5s, fighting any out-of-band change (e.g. a manual
+# reset). on_change fires only on an actual user interaction, not on mere
+# reruns, so it can't fight external changes. Resync the widget's
+# remembered value if the backend's active strategy changed underneath it
+# (e.g. from another browser tab) so this tab doesn't keep showing a stale
+# selection either.
+if st.session_state.get("_last_known_strategy") != current_strategy:
+    st.session_state["strategy_select"] = strategy_labels[current_index]
+    st.session_state["_last_known_strategy"] = current_strategy
+
+
+def _on_strategy_change():
+    chosen_label = st.session_state["strategy_select"]
+    chosen_key = strategy_keys[strategy_labels.index(chosen_label)]
+    state_store.create_control_request("SET_STRATEGY", {"strategy": chosen_key})
+    st.session_state["_last_known_strategy"] = chosen_key
+
+
+st.selectbox(
+    "Signal strategy engine.py uses for new entries (switches immediately, no restart needed):",
+    strategy_labels, key="strategy_select", on_change=_on_strategy_change,
+)
+st.caption(
+    "Changing this only affects NEW signals from now on -- an already-open position keeps "
+    "running under whatever strategy proposed it. Backtest each option in "
+    "backtest_experiments.py before trusting it; win rates vary a lot between them."
+)
+
+# ------------------------------------------------------------ timeframe picker
+timeframe_options = config.TIMEFRAME["AVAILABLE_MINUTES"]
+timeframe_labels = [f"{m} min" for m in timeframe_options]
+current_timeframe = snapshot["active_timeframe"]
+current_tf_index = timeframe_options.index(current_timeframe) if current_timeframe in timeframe_options else \
+    timeframe_options.index(config.TIMEFRAME["DEFAULT_MINUTES"])
+
+if st.session_state.get("_last_known_timeframe") != current_timeframe:
+    st.session_state["timeframe_select"] = timeframe_labels[current_tf_index]
+    st.session_state["_last_known_timeframe"] = current_timeframe
+
+
+def _on_timeframe_change():
+    chosen_label = st.session_state["timeframe_select"]
+    chosen_minutes = timeframe_options[timeframe_labels.index(chosen_label)]
+    state_store.create_control_request("SET_TIMEFRAME", {"minutes": chosen_minutes})
+    st.session_state["_last_known_timeframe"] = chosen_minutes
+
+
+st.selectbox(
+    "Candle timeframe (switches immediately, no restart needed):",
+    timeframe_labels, key="timeframe_select", on_change=_on_timeframe_change,
+)
+st.caption(
+    "⚠️ Every strategy's periods (EMA9/20/50, ADX14, UT Bot's ATR10/14, etc.) were "
+    "chosen and backtested assuming 15-min candles. Switching timeframe does NOT rescale "
+    "them -- EMA20 on 1-min candles is a 20-*minute* trend, not the 5-*hour* one it was "
+    "tuned for. There is no backtest data for any timeframe other than 15-min in this repo "
+    "-- anything else is genuinely untested live behavior, not a validated variant."
+)
+
+# --------------------------------------------------------------- auto-confirm
+current_auto_confirm = snapshot["auto_confirm"]
+
+if st.session_state.get("_last_known_auto_confirm") != current_auto_confirm:
+    st.session_state["auto_confirm_toggle"] = current_auto_confirm
+    st.session_state["_last_known_auto_confirm"] = current_auto_confirm
+
+
+def _on_auto_confirm_change():
+    chosen = st.session_state["auto_confirm_toggle"]
+    state_store.create_control_request("SET_AUTO_CONFIRM", {"enabled": chosen})
+    st.session_state["_last_known_auto_confirm"] = chosen
+
+
+st.toggle(
+    "Auto-confirm signals (skip manual review)",
+    key="auto_confirm_toggle", on_change=_on_auto_confirm_change,
+)
+if current_auto_confirm:
+    st.error(
+        "🔴 AUTO-CONFIRM IS ON. Every signal that fires opens a paper position immediately, "
+        "with no review window -- the Confirm/Reject step you've been using is bypassed "
+        "entirely. All the same risk controls (SL/TSL/daily cap/cumulative breaker) still "
+        "apply once a position is open; what's gone is your chance to look at a signal "
+        "before it becomes a trade."
+    )
+else:
+    st.caption(
+        "Auto-confirm is off right now -- signals will wait for your manual Confirm/Reject "
+        "instead of opening automatically."
+    )
 
 st.divider()
 
@@ -131,6 +239,35 @@ if today_closed:
         f"{row.instrument} Rs {row.net_pnl:,.2f}" for row in breakdown.itertuples()
     ))
 
+# ------------------------------------------------------- cumulative drawdown
+cum_stats = snapshot["cumulative_pnl_stats"]
+risk_state = snapshot["risk_state"]
+cd1, cd2, cd3 = st.columns(3)
+cd1.metric("All-time P&L", f"Rs {cum_stats['cumulative_pnl']:,.2f}")
+cd2.metric("Peak P&L", f"Rs {cum_stats['peak_pnl']:,.2f}")
+cd3.metric("Current Drawdown", f"Rs {cum_stats['drawdown']:,.2f}")
+
+if not config.RISK["ENABLE_CUMULATIVE_DRAWDOWN_BREAKER"]:
+    st.caption(
+        "Cumulative drawdown breaker: OFF. The daily cap above resets every day and can't "
+        "catch a losing streak spread across many days -- enable "
+        "config.RISK.ENABLE_CUMULATIVE_DRAWDOWN_BREAKER to guard against that too."
+    )
+elif risk_state["cumulative_breaker_tripped"]:
+    st.error(
+        f"TRADING HALTED -- cumulative drawdown breached -Rs "
+        f"{config.RISK['MAX_CUMULATIVE_DRAWDOWN']:,.0f} at {risk_state['tripped_at']}. "
+        f"No new entries anywhere until this is manually reset (it does NOT auto-reset daily)."
+    )
+    if st.button("Reset Cumulative Drawdown Breaker (testing only)"):
+        state_store.create_control_request("RESET_CUMULATIVE_BREAKER")
+        st.rerun()
+else:
+    st.caption(
+        f"Cumulative drawdown breaker: ON. Halts all new entries if drawdown exceeds "
+        f"-Rs {config.RISK['MAX_CUMULATIVE_DRAWDOWN']:,.0f} from its running peak."
+    )
+
 st.divider()
 
 # ------------------------------------------------------------ pending signal
@@ -140,7 +277,19 @@ if pending is None:
     st.info("No signal awaiting confirmation right now.")
 else:
     sl_points = engine.compute_sl_points(pending["instrument"], pending["proposed_ltp"])
-    worst_case = f"Rs {sl_points * pending['qty']:,.2f}" if sl_points is not None else "N/A (will be rejected on confirm)"
+    if sl_points is not None:
+        # sl_points*qty is only the price-movement portion of the risk
+        # budget -- compute_sl_points already sizes it net of estimated
+        # round-trip costs, so the HONEST worst-case total also needs
+        # those costs added back, or this understates what a real SL hit
+        # actually costs (found live: a signal showing ~Rs440 here
+        # actually costs ~Rs500 all-in before any overshoot).
+        est_costs = cost_model.estimate_round_trip_costs(
+            pending["proposed_ltp"], pending["qty"], config.INSTRUMENTS[pending["instrument"]]["exchange"]
+        )
+        worst_case = f"Rs {sl_points * pending['qty'] + est_costs:,.2f} (incl. ~Rs {est_costs:,.0f} est. costs)"
+    else:
+        worst_case = "N/A (will be rejected on confirm)"
 
     c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1])
     c1.metric("Instrument", pending["instrument"])
@@ -151,7 +300,7 @@ else:
     st.caption(f"Expiry: {pending['expiry']} | Worst-case loss at SL (estimate): {worst_case} | "
                f"Proposal expires: {pending['expires_at']}")
 
-    confirm_disabled = bool(summary["circuit_breaker_tripped"])
+    confirm_disabled = bool(summary["circuit_breaker_tripped"]) or bool(risk_state["cumulative_breaker_tripped"])
     bc1, bc2 = st.columns(2)
     with bc1:
         if st.button("Confirm Entry", type="primary", disabled=confirm_disabled, use_container_width=True):
@@ -162,7 +311,7 @@ else:
             state_store.create_control_request("REJECT_SIGNAL", {"signal_id": pending["id"]})
             st.rerun()
     if confirm_disabled:
-        st.warning("Confirm is disabled while the daily circuit breaker is tripped.")
+        st.warning("Confirm is disabled while a circuit breaker (daily or cumulative drawdown) is tripped.")
 
 st.divider()
 
@@ -199,6 +348,17 @@ else:
 
 st.divider()
 
+# -------------------------------------------------------------- activity log
+st.subheader("Activity Log")
+activity = snapshot["activity_log"]
+if not activity:
+    st.info("No activity yet -- signals, entries, exits, and breaker events will appear here as they happen.")
+else:
+    log_df = pd.DataFrame(activity)[["timestamp", "event_type", "message"]]
+    st.dataframe(log_df, use_container_width=True, hide_index=True, height=250)
+
+st.divider()
+
 # ------------------------------------------------------------ trade history
 st.subheader("Trade History")
 closed = snapshot["closed_positions"]
@@ -222,3 +382,67 @@ else:
         file_name="paper_trades_dashboard.csv",
         mime="text/csv",
     )
+
+st.divider()
+
+# --------------------------------------------------------- strategy analysis
+st.subheader("Strategy Analysis (Historical Backtest)")
+st.caption(
+    "Context for days with few or no trades: this is how often the current rule set "
+    "actually fires, and what it would have done historically. It is NOT a live track "
+    "record -- see the caveats below."
+)
+
+summary_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backtest_summary.json")
+if not os.path.exists(summary_path):
+    st.info(
+        "No backtest summary found. Run `python backtest.py` locally to generate one -- "
+        "it needs the historical CSVs, which aren't shipped to this environment if you're "
+        "viewing this on the hosted/cloud copy."
+    )
+else:
+    with open(summary_path) as f:
+        backtest_data = json.load(f)
+    s = backtest_data.get("summary")
+
+    filter_label = "ON (EMA50 trend filter)" if backtest_data["trend_filter_enabled"] else "OFF (baseline)"
+    st.caption(f"Backtest generated {backtest_data['generated_at']} | Strategy config at that time: {filter_label}")
+
+    if backtest_data["trend_filter_enabled"] != config.STRATEGY["ENABLE_TREND_FILTER"]:
+        st.warning(
+            "This backtest was generated with a DIFFERENT strategy setting than what's "
+            "running live right now -- re-run backtest.py to refresh it."
+        )
+
+    if s is None:
+        st.info("No trades were generated over the backtest period.")
+    else:
+        b1, b2, b3, b4 = st.columns(4)
+        b1.metric("Historical trades", s["total_trades"])
+        b2.metric("Win rate", f"{s['win_rate_pct']}%", f"{s['wins']}W / {s['losses']}L")
+        b3.metric("Total P&L (backtest)", f"Rs {s['total_pnl']:,.2f}")
+        b4.metric("Max drawdown", f"Rs {s['max_drawdown']:,.2f}")
+        st.caption(f"Average P&L per trade: Rs {s['avg_pnl']:,.2f} | "
+                   f"Period: {s['date_range'][0][:10]} to {s['date_range'][1][:10]}")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.caption("By instrument")
+            st.dataframe(pd.DataFrame(s["per_instrument"]), use_container_width=True, hide_index=True)
+        with c2:
+            st.caption("By exit reason")
+            st.dataframe(pd.DataFrame(s["per_exit_reason"]), use_container_width=True, hide_index=True)
+
+    with st.expander("Important caveats about these numbers"):
+        st.markdown(
+            "- Option premiums are **simulated** via Black-Scholes using realized volatility "
+            "as a stand-in for implied vol, and a fixed assumed "
+            f"**{backtest_data['assumed_days_to_expiry']}-day time-to-expiry** -- real historical "
+            "expiry calendars aren't available in this dataset.\n"
+            "- This is a theoretical approximation of the rule set's behavior, **not** a "
+            "measurement of real historical option P&L.\n"
+            "- Past backtest performance is **not** a promise about future results, live or "
+            "otherwise.\n"
+            "- Signals fire relatively rarely (roughly once every several trading hours per "
+            "instrument) -- a day or two with zero trades is expected, not a malfunction."
+        )

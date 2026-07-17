@@ -88,6 +88,27 @@ def init_db():
                 tripped_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS strategy_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                active_strategy TEXT NOT NULL DEFAULT 'EMA50_TREND_FILTER'
+            );
+
+            CREATE TABLE IF NOT EXISTS timeframe_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                active_minutes INTEGER NOT NULL DEFAULT 15
+            );
+
+            CREATE TABLE IF NOT EXISTS auto_confirm_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                enabled INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE TABLE IF NOT EXISTS risk_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                cumulative_breaker_tripped INTEGER NOT NULL DEFAULT 0,
+                tripped_at TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS engine_heartbeat (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 last_poll_at TEXT,
@@ -100,6 +121,13 @@ def init_db():
                 payload TEXT,
                 created_at TEXT NOT NULL,
                 handled INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS activity_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                message TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS spot_quotes (
@@ -224,6 +252,15 @@ def get_open_position():
     conn = _connect()
     try:
         row = conn.execute("SELECT * FROM positions WHERE status = 'OPEN' LIMIT 1").fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_position_by_id(position_id):
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT * FROM positions WHERE id = ?", (position_id,)).fetchone()
         return dict(row) if row else None
     finally:
         conn.close()
@@ -377,6 +414,152 @@ def reset_circuit_breaker(date_str):
         conn.close()
 
 
+# ---------------------------------------------------------- cumulative drawdown
+
+def get_cumulative_pnl_stats():
+    """All-time (all closed trades, any date) cumulative P&L, running peak,
+    and current drawdown from that peak -- unlike daily_summary, this never
+    resets on its own; it's meant to catch a losing streak that spans many
+    days, which the per-day cap can't see."""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT net_pnl FROM positions WHERE status = 'CLOSED' ORDER BY exit_time ASC"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    cumulative = 0.0
+    peak = 0.0
+    for row in rows:
+        cumulative += row["net_pnl"]
+        peak = max(peak, cumulative)
+    return {"cumulative_pnl": cumulative, "peak_pnl": peak, "drawdown": cumulative - peak}
+
+
+def get_risk_state():
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT * FROM risk_state WHERE id = 1").fetchone()
+        if row is None:
+            conn.execute(
+                "INSERT INTO risk_state (id, cumulative_breaker_tripped) VALUES (1, 0)"
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM risk_state WHERE id = 1").fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+
+def trip_cumulative_breaker():
+    conn = _connect()
+    try:
+        conn.execute(
+            "INSERT INTO risk_state (id, cumulative_breaker_tripped, tripped_at) VALUES (1, 1, ?) "
+            "ON CONFLICT(id) DO UPDATE SET cumulative_breaker_tripped = 1, tripped_at = excluded.tripped_at",
+            (_now_iso(),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def reset_cumulative_breaker():
+    conn = _connect()
+    try:
+        conn.execute(
+            "UPDATE risk_state SET cumulative_breaker_tripped = 0, tripped_at = NULL WHERE id = 1"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ------------------------------------------------------------- strategy_state
+
+def get_active_strategy():
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT * FROM strategy_state WHERE id = 1").fetchone()
+        if row is None:
+            conn.execute("INSERT INTO strategy_state (id, active_strategy) VALUES (1, 'EMA50_TREND_FILTER')")
+            conn.commit()
+            return "EMA50_TREND_FILTER"
+        return row["active_strategy"]
+    finally:
+        conn.close()
+
+
+def set_active_strategy(strategy_name):
+    conn = _connect()
+    try:
+        conn.execute(
+            "INSERT INTO strategy_state (id, active_strategy) VALUES (1, ?) "
+            "ON CONFLICT(id) DO UPDATE SET active_strategy = excluded.active_strategy",
+            (strategy_name,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ------------------------------------------------------------ timeframe_state
+
+def get_active_timeframe():
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT * FROM timeframe_state WHERE id = 1").fetchone()
+        if row is None:
+            conn.execute("INSERT INTO timeframe_state (id, active_minutes) VALUES (1, 15)")
+            conn.commit()
+            return 15
+        return row["active_minutes"]
+    finally:
+        conn.close()
+
+
+def set_active_timeframe(minutes):
+    conn = _connect()
+    try:
+        conn.execute(
+            "INSERT INTO timeframe_state (id, active_minutes) VALUES (1, ?) "
+            "ON CONFLICT(id) DO UPDATE SET active_minutes = excluded.active_minutes",
+            (minutes,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ----------------------------------------------------------- auto_confirm_state
+
+def get_auto_confirm():
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT * FROM auto_confirm_state WHERE id = 1").fetchone()
+        if row is None:
+            conn.execute("INSERT INTO auto_confirm_state (id, enabled) VALUES (1, 1)")
+            conn.commit()
+            return True
+        return bool(row["enabled"])
+    finally:
+        conn.close()
+
+
+def set_auto_confirm(enabled):
+    conn = _connect()
+    try:
+        conn.execute(
+            "INSERT INTO auto_confirm_state (id, enabled) VALUES (1, ?) "
+            "ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled",
+            (int(enabled),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------- engine_heartbeat
 
 def update_heartbeat(pid):
@@ -407,6 +590,31 @@ def is_engine_alive(stale_after_seconds=90):
         return False
     last = datetime.datetime.fromisoformat(hb["last_poll_at"])
     return (datetime.datetime.now() - last).total_seconds() <= stale_after_seconds
+
+
+# --------------------------------------------------------------------- activity_log
+
+def log_event(event_type, message):
+    conn = _connect()
+    try:
+        conn.execute(
+            "INSERT INTO activity_log (timestamp, event_type, message) VALUES (?, ?, ?)",
+            (_now_iso(), event_type, message),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_recent_activity(limit=100):
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM activity_log ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 # -------------------------------------------------------------------- spot_quotes
@@ -491,6 +699,12 @@ def get_dashboard_snapshot():
         "engine_alive": is_engine_alive(),
         "closed_positions": get_closed_positions(limit=100),
         "spot_quotes": get_spot_quotes(),
+        "cumulative_pnl_stats": get_cumulative_pnl_stats(),
+        "risk_state": get_risk_state(),
+        "activity_log": get_recent_activity(limit=100),
+        "active_strategy": get_active_strategy(),
+        "active_timeframe": get_active_timeframe(),
+        "auto_confirm": get_auto_confirm(),
     }
 
 
