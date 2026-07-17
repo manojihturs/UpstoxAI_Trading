@@ -14,9 +14,10 @@ simpler than per-strategy prep, and the data involved is small.
 signal_engine.get_signal() -- the raw EMA9/EMA20+ADX crossover -- stays
 untouched as the base building block several of these reuse.
 """
+import numpy as np
 import pandas as pd
 
-from signal_engine import get_signal, confirm_with_trend_filter, ADX_THRESHOLD, LAST_ENTRY_TIME, _ema
+from signal_engine import get_signal, confirm_with_trend_filter, ADX_THRESHOLD, LAST_ENTRY_TIME, _ema, _atr
 
 
 def _row_time(row):
@@ -88,6 +89,78 @@ def signal_pivot_point(row):
     return None
 
 
+# ------------------------------------------------------------------ UT Bot
+
+UT_BOT_VARIANTS = {
+    "UT_BOT_STANDARD": {"key_value": 1.0, "atr_period": 10},
+    "UT_BOT_CONSERVATIVE": {"key_value": 2.0, "atr_period": 14},
+}
+
+
+def _ut_bot_column(key_value, atr_period):
+    return f"ut_stop_kv{key_value}_atr{atr_period}"
+
+
+def compute_ut_bot_trailing_stop(df, key_value, atr_period):
+    """UT Bot Alerts: an ATR-scaled trailing stop that only ever moves in
+    the trend's favor (like a SuperTrend/Chandelier Exit). nLoss = KeyValue
+    * ATR sets how far the line trails; the entry signal (see
+    _signal_ut_bot) is a price crossover of this line, not a moving-average
+    relationship or a fixed daily level -- a third, distinct signal family
+    alongside the EMA-cross and pivot-point strategies above."""
+    atr = _atr(df["high"], df["low"], df["close"], atr_period)
+    n_loss = (key_value * atr).to_numpy()
+    close = df["close"].to_numpy()
+    n = len(df)
+    stop = np.full(n, np.nan)
+    if n == 0:
+        return pd.Series(stop, index=df.index)
+
+    stop[0] = close[0] - n_loss[0] if not np.isnan(n_loss[0]) else close[0]
+    for i in range(1, n):
+        nl = n_loss[i]
+        if np.isnan(nl):
+            stop[i] = stop[i - 1]
+            continue
+        prev_stop, prev_close, c = stop[i - 1], close[i - 1], close[i]
+        if c > prev_stop and prev_close > prev_stop:
+            stop[i] = max(prev_stop, c - nl)
+        elif c < prev_stop and prev_close < prev_stop:
+            stop[i] = min(prev_stop, c + nl)
+        elif c > prev_stop:
+            stop[i] = c - nl
+        else:
+            stop[i] = c + nl
+    return pd.Series(stop, index=df.index)
+
+
+def _signal_ut_bot(row, key_value, atr_period):
+    if _row_time(row) > LAST_ENTRY_TIME:
+        return None
+    col = _ut_bot_column(key_value, atr_period)
+    stop = row.get(col)
+    prev_stop = row.get(col + "_prev")
+    prev_close = row.get("prev_close")
+    if any(v is None or pd.isna(v) for v in (stop, prev_stop, prev_close)):
+        return None
+    close = row["close"]
+    if prev_close <= prev_stop and close > stop:
+        return "CE"
+    if prev_close >= prev_stop and close < stop:
+        return "PE"
+    return None
+
+
+def signal_ut_bot_standard(row):
+    p = UT_BOT_VARIANTS["UT_BOT_STANDARD"]
+    return _signal_ut_bot(row, p["key_value"], p["atr_period"])
+
+
+def signal_ut_bot_conservative(row):
+    p = UT_BOT_VARIANTS["UT_BOT_CONSERVATIVE"]
+    return _signal_ut_bot(row, p["key_value"], p["atr_period"])
+
+
 STRATEGIES = {
     "BASELINE": {
         "label": "Baseline: EMA9/EMA20 cross + ADX",
@@ -108,6 +181,14 @@ STRATEGIES = {
     "PIVOT_POINT": {
         "label": "Pivot point crossover (previous day's PP)",
         "signal_fn": signal_pivot_point,
+    },
+    "UT_BOT_STANDARD": {
+        "label": "UT Bot (ATR trailing stop, KeyValue=1, ATR=10)",
+        "signal_fn": signal_ut_bot_standard,
+    },
+    "UT_BOT_CONSERVATIVE": {
+        "label": "UT Bot conservative (KeyValue=2, ATR=14)",
+        "signal_fn": signal_ut_bot_conservative,
     },
 }
 
@@ -143,5 +224,11 @@ def prepare_columns(df, prev_day_ohlc=None):
         # backtest path already computed a real per-day pivot_pp column via
         # backtest.add_pivot_column() before calling this -- don't clobber it
         df["pivot_pp"] = None
+
+    for params in UT_BOT_VARIANTS.values():
+        col = _ut_bot_column(params["key_value"], params["atr_period"])
+        stop = compute_ut_bot_trailing_stop(df, params["key_value"], params["atr_period"])
+        df[col] = stop
+        df[col + "_prev"] = stop.shift(1)
 
     return df
