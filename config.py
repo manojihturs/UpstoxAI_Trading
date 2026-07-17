@@ -75,15 +75,17 @@ RISK = {
 }
 
 # ---- Auto-confirm ----
-# Off by default -- this is the core safety design of the whole app: a
-# signal proposes, a human confirms, THEN it becomes a real (paper)
-# position. Turning this on removes that human check entirely -- every
-# signal that fires opens a position immediately and automatically, with
-# no review window. Live-switchable from the dashboard (a toggle, not
-# buried in code) via state_store.get/set_auto_confirm(), same pattern as
-# the strategy/timeframe dropdowns.
+# ON by default per explicit request: every signal that fires opens a
+# (paper) position immediately, with no manual review window. This
+# removes the human-confirms-first check that was this app's original
+# safety design -- a deliberate choice for paper trading, not something
+# to carry over unquestioned if this project ever moves toward real
+# money. Live-switchable from the dashboard toggle at any time via
+# state_store.get/set_auto_confirm(), same pattern as the
+# strategy/timeframe dropdowns -- turning it back off does not require
+# a code change.
 AUTO_CONFIRM = {
-    "ENABLED": False,
+    "ENABLED": True,
 }
 
 # ---- Costs (retail discount-broker assumptions; approximate, tune as needed) ----

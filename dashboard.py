@@ -175,9 +175,8 @@ if current_auto_confirm:
     )
 else:
     st.caption(
-        "Off by default -- this is the core safety design of the app: a signal proposes, "
-        "you confirm, then it becomes a (paper) position. Turning this on removes that "
-        "human check entirely."
+        "Auto-confirm is off right now -- signals will wait for your manual Confirm/Reject "
+        "instead of opening automatically."
     )
 
 st.divider()

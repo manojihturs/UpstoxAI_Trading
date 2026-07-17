@@ -17,7 +17,13 @@ def store(tmp_path, monkeypatch):
     return state_store
 
 
-def test_auto_confirm_defaults_off(store):
+def test_auto_confirm_defaults_on(store):
+    # ON by default per explicit request -- see config.py AUTO_CONFIRM comment
+    assert store.get_auto_confirm() is True
+
+
+def test_set_and_get_auto_confirm_off(store):
+    store.set_auto_confirm(False)
     assert store.get_auto_confirm() is False
 
 

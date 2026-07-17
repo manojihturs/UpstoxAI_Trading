@@ -100,7 +100,7 @@ def init_db():
 
             CREATE TABLE IF NOT EXISTS auto_confirm_state (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
-                enabled INTEGER NOT NULL DEFAULT 0
+                enabled INTEGER NOT NULL DEFAULT 1
             );
 
             CREATE TABLE IF NOT EXISTS risk_state (
@@ -539,9 +539,9 @@ def get_auto_confirm():
     try:
         row = conn.execute("SELECT * FROM auto_confirm_state WHERE id = 1").fetchone()
         if row is None:
-            conn.execute("INSERT INTO auto_confirm_state (id, enabled) VALUES (1, 0)")
+            conn.execute("INSERT INTO auto_confirm_state (id, enabled) VALUES (1, 1)")
             conn.commit()
-            return False
+            return True
         return bool(row["enabled"])
     finally:
         conn.close()
