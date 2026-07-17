@@ -96,7 +96,7 @@ def compute_sl_points(instrument, entry_premium_raw):
     instrument's noise floor. Returns None if the budget can't support even
     the floor -- caller should reject the trade rather than exceed budget."""
     cfg = config.INSTRUMENTS[instrument]
-    qty = cfg["lot_size"]
+    qty = state_store.get_qty(instrument)
     budget_per_trade = config.RISK["DAILY_LOSS_CAP"] / config.RISK["MAX_TRADES_BUDGET_DIVISOR"]
     est_costs = cost_model.estimate_round_trip_costs(entry_premium_raw, qty, cfg["exchange"])
     budget_after_costs = budget_per_trade - est_costs
@@ -264,7 +264,7 @@ def scan_for_signal(instrument_states, headers, today):
             print(f"{name}: failed to fetch ATM option: {e}")
             continue
 
-        qty = cfg["lot_size"]
+        qty = state_store.get_qty(name)
         signal_id = state_store.create_pending_signal(
             name, signal, opt["strike"], opt["expiry"], opt["instrument_key"],
             opt["ltp"], qty, config.TIMING["PENDING_SIGNAL_TTL_SECONDS"])
@@ -376,6 +376,12 @@ def process_control_requests(headers, today):
                 state_text = "ON -- new signals will open a paper position immediately, no manual review" \
                     if enabled else "OFF -- back to manual confirm for every signal"
                 log("AUTO_CONFIRM", f"Auto-confirm switched {state_text}")
+            elif req["kind"] == "SET_QTY":
+                instrument = req["payload"]["instrument"]
+                new_qty = req["payload"]["qty"]
+                state_store.set_qty(instrument, new_qty)
+                log("QTY", f"Order quantity for {instrument} switched to {new_qty} "
+                            f"(applies to NEW signals only, not the open position if any)")
         except Exception as e:
             print(f"ERROR handling control request {req['id']} ({req['kind']}): {e}")
         state_store.mark_control_request_handled(req["id"])
@@ -401,6 +407,16 @@ def main():
 
         state_store.update_heartbeat(os.getpid())
 
+        # Settings toggles (auto-confirm, strategy, timeframe, breaker resets) are
+        # user-safety controls, not trading actions -- process them every cycle
+        # regardless of market hours so an off-hours click (e.g. turning
+        # auto-confirm off before tomorrow's open) takes effect immediately
+        # instead of silently queuing until the market reopens.
+        try:
+            process_control_requests(None, today)
+        except Exception as e:
+            print(f"ERROR processing control requests: {e}")
+
         market_open_now = config.TIMING["MARKET_OPEN"] <= current_time <= config.TIMING["MARKET_CLOSE"]
         if not market_open_now:
             if market_was_open is not False:
@@ -418,7 +434,6 @@ def main():
         try:
             refresh_spot_quotes(headers)
             state_store.expire_stale_pending_signals()
-            process_control_requests(headers, today)
 
             open_position = state_store.get_open_position()
             if open_position:

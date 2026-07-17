@@ -11,7 +11,7 @@ import numpy as np
 import datetime
 
 ADX_THRESHOLD = 12
-LAST_ENTRY_TIME = datetime.time(14, 45)
+LAST_ENTRY_TIME = datetime.time(14, 30)
 SQUARE_OFF_TIME = datetime.time(15, 15)
 MARKET_OPEN = datetime.time(9, 15)
 MARKET_CLOSE = datetime.time(15, 30)

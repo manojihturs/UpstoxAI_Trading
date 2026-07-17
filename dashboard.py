@@ -181,6 +181,42 @@ else:
 
 st.divider()
 
+# ------------------------------------------------------------ qty preference
+st.subheader("Order Quantity")
+st.caption(
+    "Quantity used for each NEW signal, per instrument (switches immediately, no restart "
+    "needed). One lot = "
+    + ", ".join(f"{name} {cfg['lot_size']}" for name, cfg in config.INSTRUMENTS.items())
+    + ". An already-open position keeps the quantity it was opened with."
+)
+current_qty_by_instrument = snapshot["qty_by_instrument"]
+qty_cols = st.columns(len(config.INSTRUMENTS))
+for col, name in zip(qty_cols, config.INSTRUMENTS):
+    lot_size = config.INSTRUMENTS[name]["lot_size"]
+    current_qty = current_qty_by_instrument[name]
+    resync_key = f"_last_known_qty_{name}"
+    widget_key = f"qty_input_{name}"
+
+    if st.session_state.get(resync_key) != current_qty:
+        st.session_state[widget_key] = current_qty
+        st.session_state[resync_key] = current_qty
+
+    def _make_on_qty_change(instrument, resync_key, widget_key):
+        def _on_qty_change():
+            chosen = st.session_state[widget_key]
+            state_store.create_control_request("SET_QTY", {"instrument": instrument, "qty": chosen})
+            st.session_state[resync_key] = chosen
+        return _on_qty_change
+
+    with col:
+        st.number_input(
+            name, min_value=lot_size, step=lot_size, key=widget_key,
+            on_change=_make_on_qty_change(name, resync_key, widget_key),
+            help=f"1 lot = {lot_size}. Enter a multiple of {lot_size}.",
+        )
+
+st.divider()
+
 # ------------------------------------------------------------- spot quotes
 quotes = snapshot["spot_quotes"]
 q1, q2, q3 = st.columns(3)
@@ -366,10 +402,17 @@ if not closed:
     st.info("No closed trades yet.")
 else:
     df = pd.DataFrame(closed)
-    display_cols = ["entry_time", "instrument", "direction", "strike", "qty",
-                     "entry_ltp_net", "exit_time", "exit_ltp_net", "exit_reason",
+    # entry_time/exit_time are stored as 24h ISO timestamps -- format to a
+    # human-readable 12h AM/PM string for the display table only; the raw
+    # ISO values are still available in the "Full cost breakdown" expander
+    # and the CSV export below.
+    df["entry_time_display"] = pd.to_datetime(df["entry_time"]).dt.strftime("%Y-%m-%d %I:%M:%S %p")
+    df["exit_time_display"] = pd.to_datetime(df["exit_time"]).dt.strftime("%Y-%m-%d %I:%M:%S %p")
+    display_cols = ["entry_time_display", "instrument", "direction", "strike", "qty",
+                     "entry_ltp_net", "exit_time_display", "exit_ltp_net", "exit_reason",
                      "gross_pnl", "costs_total", "net_pnl"]
     st.dataframe(df[display_cols].rename(columns={
+        "entry_time_display": "entry_time", "exit_time_display": "exit_time",
         "entry_ltp_net": "entry_net", "exit_ltp_net": "exit_net",
     }), use_container_width=True, hide_index=True)
 
