@@ -216,11 +216,12 @@ def scan_for_signal(instrument_states, headers):
     Only one instrument's signal is proposed per cycle (single-position
     design) -- the rest are simply reconsidered next cycle if still flat."""
     active_strategy = state_store.get_active_strategy()
+    active_timeframe = state_store.get_active_timeframe()
 
     for name, cfg in config.INSTRUMENTS.items():
         state = instrument_states[name]
         try:
-            candles = get_intraday_candles(cfg["spot_instrument_key"], headers, interval_minutes=15)
+            candles = get_intraday_candles(cfg["spot_instrument_key"], headers, interval_minutes=active_timeframe)
         except Exception as e:
             print(f"{name}: failed to fetch candles: {e}")
             continue
@@ -262,8 +263,8 @@ def scan_for_signal(instrument_states, headers):
         qty = cfg["lot_size"]
         state_store.create_pending_signal(name, signal, opt["strike"], opt["expiry"], opt["instrument_key"],
                                            opt["ltp"], qty, config.TIMING["PENDING_SIGNAL_TTL_SECONDS"])
-        log("SIGNAL", f"SIGNAL ({active_strategy}): {name} {signal} strike={opt['strike']} "
-                       f"ltp={opt['ltp']} -- awaiting confirmation")
+        log("SIGNAL", f"SIGNAL ({active_strategy}, {active_timeframe}min): {name} {signal} "
+                       f"strike={opt['strike']} ltp={opt['ltp']} -- awaiting confirmation")
         return  # single-position design: stop scanning once one signal is proposed
 
 
@@ -354,6 +355,11 @@ def process_control_requests(headers, today):
                 state_store.set_active_strategy(new_strategy)
                 label = strategies.STRATEGIES.get(new_strategy, {}).get("label", new_strategy)
                 log("STRATEGY", f"Active strategy switched to {new_strategy}: {label}")
+            elif req["kind"] == "SET_TIMEFRAME":
+                new_minutes = req["payload"]["minutes"]
+                state_store.set_active_timeframe(new_minutes)
+                log("TIMEFRAME", f"Active candle timeframe switched to {new_minutes}min "
+                                  f"(UNTESTED at this timeframe -- backtests only cover 15min)")
         except Exception as e:
             print(f"ERROR handling control request {req['id']} ({req['kind']}): {e}")
         state_store.mark_control_request_handled(req["id"])

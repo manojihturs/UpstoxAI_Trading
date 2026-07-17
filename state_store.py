@@ -93,6 +93,11 @@ def init_db():
                 active_strategy TEXT NOT NULL DEFAULT 'EMA50_TREND_FILTER'
             );
 
+            CREATE TABLE IF NOT EXISTS timeframe_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                active_minutes INTEGER NOT NULL DEFAULT 15
+            );
+
             CREATE TABLE IF NOT EXISTS risk_state (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 cumulative_breaker_tripped INTEGER NOT NULL DEFAULT 0,
@@ -494,6 +499,34 @@ def set_active_strategy(strategy_name):
         conn.close()
 
 
+# ------------------------------------------------------------ timeframe_state
+
+def get_active_timeframe():
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT * FROM timeframe_state WHERE id = 1").fetchone()
+        if row is None:
+            conn.execute("INSERT INTO timeframe_state (id, active_minutes) VALUES (1, 15)")
+            conn.commit()
+            return 15
+        return row["active_minutes"]
+    finally:
+        conn.close()
+
+
+def set_active_timeframe(minutes):
+    conn = _connect()
+    try:
+        conn.execute(
+            "INSERT INTO timeframe_state (id, active_minutes) VALUES (1, ?) "
+            "ON CONFLICT(id) DO UPDATE SET active_minutes = excluded.active_minutes",
+            (minutes,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------- engine_heartbeat
 
 def update_heartbeat(pid):
@@ -637,6 +670,7 @@ def get_dashboard_snapshot():
         "risk_state": get_risk_state(),
         "activity_log": get_recent_activity(limit=100),
         "active_strategy": get_active_strategy(),
+        "active_timeframe": get_active_timeframe(),
     }
 
 

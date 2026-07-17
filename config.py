@@ -112,6 +112,24 @@ STRATEGY = {
     "TREND_FILTER_EMA_PERIOD": 50,
 }
 
+# ---- Candle timeframe ----
+# Live-switchable from the dashboard (state_store.get/set_active_timeframe),
+# same pattern as the strategy dropdown -- no restart needed. All 6 options
+# verified directly against Upstox's intraday API before being listed here.
+#
+# IMPORTANT: every strategy's periods (EMA9/20/50, ADX14, pivot, UT Bot's
+# ATR10/14) were chosen and backtested assuming 15-min candles. Switching
+# timeframe does NOT rescale those periods -- EMA20 on 1-min candles is a
+# 20-*minute* trend instead of a 5-*hour* one, a fundamentally different
+# sensitivity, not just "the same strategy, checked more often." There is
+# no backtest data for any timeframe other than 15-min in this repo
+# (nifty50_15min.csv etc.) -- switching live to another timeframe is
+# running genuinely untested behavior.
+TIMEFRAME = {
+    "AVAILABLE_MINUTES": [1, 3, 5, 15, 30, 60],
+    "DEFAULT_MINUTES": 15,
+}
+
 # ---- Timing ----
 TIMING = {
     "MARKET_OPEN": MARKET_OPEN,

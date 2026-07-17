@@ -115,6 +115,37 @@ st.caption(
     "backtest_experiments.py before trusting it; win rates vary a lot between them."
 )
 
+# ------------------------------------------------------------ timeframe picker
+timeframe_options = config.TIMEFRAME["AVAILABLE_MINUTES"]
+timeframe_labels = [f"{m} min" for m in timeframe_options]
+current_timeframe = snapshot["active_timeframe"]
+current_tf_index = timeframe_options.index(current_timeframe) if current_timeframe in timeframe_options else \
+    timeframe_options.index(config.TIMEFRAME["DEFAULT_MINUTES"])
+
+if st.session_state.get("_last_known_timeframe") != current_timeframe:
+    st.session_state["timeframe_select"] = timeframe_labels[current_tf_index]
+    st.session_state["_last_known_timeframe"] = current_timeframe
+
+
+def _on_timeframe_change():
+    chosen_label = st.session_state["timeframe_select"]
+    chosen_minutes = timeframe_options[timeframe_labels.index(chosen_label)]
+    state_store.create_control_request("SET_TIMEFRAME", {"minutes": chosen_minutes})
+    st.session_state["_last_known_timeframe"] = chosen_minutes
+
+
+st.selectbox(
+    "Candle timeframe (switches immediately, no restart needed):",
+    timeframe_labels, key="timeframe_select", on_change=_on_timeframe_change,
+)
+st.caption(
+    "⚠️ Every strategy's periods (EMA9/20/50, ADX14, UT Bot's ATR10/14, etc.) were "
+    "chosen and backtested assuming 15-min candles. Switching timeframe does NOT rescale "
+    "them -- EMA20 on 1-min candles is a 20-*minute* trend, not the 5-*hour* one it was "
+    "tuned for. There is no backtest data for any timeframe other than 15-min in this repo "
+    "-- anything else is genuinely untested live behavior, not a validated variant."
+)
+
 st.divider()
 
 # ------------------------------------------------------------- spot quotes
