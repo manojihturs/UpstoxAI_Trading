@@ -12,7 +12,7 @@ import sqlite3
 import json
 import datetime
 
-from config import PATHS
+from config import PATHS, INSTRUMENTS
 
 DB_PATH = PATHS["DB_PATH"]
 
@@ -101,6 +101,11 @@ def init_db():
             CREATE TABLE IF NOT EXISTS auto_confirm_state (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 enabled INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE TABLE IF NOT EXISTS qty_state (
+                instrument TEXT PRIMARY KEY,
+                qty INTEGER NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS risk_state (
@@ -560,6 +565,42 @@ def set_auto_confirm(enabled):
         conn.close()
 
 
+# ------------------------------------------------------------------- qty_state
+
+def get_qty(instrument):
+    """Returns the configured order quantity for `instrument` -- the user's
+    saved preference if they've set one, otherwise config.py's one-lot
+    default. Live-switchable from the dashboard, same pattern as
+    strategy/timeframe/auto-confirm."""
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT * FROM qty_state WHERE instrument = ?", (instrument,)).fetchone()
+        if row is None:
+            return INSTRUMENTS[instrument]["lot_size"]
+        return row["qty"]
+    finally:
+        conn.close()
+
+
+def set_qty(instrument, qty):
+    conn = _connect()
+    try:
+        conn.execute(
+            "INSERT INTO qty_state (instrument, qty) VALUES (?, ?) "
+            "ON CONFLICT(instrument) DO UPDATE SET qty = excluded.qty",
+            (instrument, qty),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_all_qty():
+    """Returns {instrument: qty} for every instrument in config.INSTRUMENTS,
+    filling in the one-lot default for any instrument with no saved override."""
+    return {name: get_qty(name) for name in INSTRUMENTS}
+
+
 # --------------------------------------------------------------- engine_heartbeat
 
 def update_heartbeat(pid):
@@ -705,6 +746,7 @@ def get_dashboard_snapshot():
         "active_strategy": get_active_strategy(),
         "active_timeframe": get_active_timeframe(),
         "auto_confirm": get_auto_confirm(),
+        "qty_by_instrument": get_all_qty(),
     }
 
 

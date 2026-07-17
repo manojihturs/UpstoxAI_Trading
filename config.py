@@ -18,7 +18,7 @@ INSTRUMENTS = {
     "NIFTY": {
         "spot_instrument_key": "NSE_INDEX|Nifty 50",
         "strike_step": 50,
-        "lot_size": 75,
+        "lot_size": 65,
         "exchange": "NSE",
         "sl_pct": 0.30,
         "target_points": 10,
