@@ -83,14 +83,32 @@ strategy_labels = [strategies.STRATEGIES[k]["label"] for k in strategy_keys]
 current_strategy = snapshot["active_strategy"]
 current_index = strategy_keys.index(current_strategy) if current_strategy in strategy_keys else 0
 
-chosen_label = st.selectbox(
-    "Signal strategy engine.py uses for new entries (switches immediately, no restart needed):",
-    strategy_labels, index=current_index,
-)
-chosen_key = strategy_keys[strategy_labels.index(chosen_label)]
-if chosen_key != current_strategy:
+# A selectbox with a `key` remembers the user's last pick across every
+# autorefresh rerun (Streamlit widget statefulness) -- comparing that
+# remembered value against the live DB value on every rerun (as an earlier
+# version of this did) means a stale browser tab keeps re-firing the SAME
+# stale choice every 5s, fighting any out-of-band change (e.g. a manual
+# reset). on_change fires only on an actual user interaction, not on mere
+# reruns, so it can't fight external changes. Resync the widget's
+# remembered value if the backend's active strategy changed underneath it
+# (e.g. from another browser tab) so this tab doesn't keep showing a stale
+# selection either.
+if st.session_state.get("_last_known_strategy") != current_strategy:
+    st.session_state["strategy_select"] = strategy_labels[current_index]
+    st.session_state["_last_known_strategy"] = current_strategy
+
+
+def _on_strategy_change():
+    chosen_label = st.session_state["strategy_select"]
+    chosen_key = strategy_keys[strategy_labels.index(chosen_label)]
     state_store.create_control_request("SET_STRATEGY", {"strategy": chosen_key})
-    st.rerun()
+    st.session_state["_last_known_strategy"] = chosen_key
+
+
+st.selectbox(
+    "Signal strategy engine.py uses for new entries (switches immediately, no restart needed):",
+    strategy_labels, key="strategy_select", on_change=_on_strategy_change,
+)
 st.caption(
     "Changing this only affects NEW signals from now on -- an already-open position keeps "
     "running under whatever strategy proposed it. Backtest each option in "
