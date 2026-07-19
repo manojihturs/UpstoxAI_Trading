@@ -73,6 +73,7 @@ pages = [
     st.Page("ui/pages/orders_page.py", title="Orders", icon=":material/receipt_long:"),
     st.Page("ui/pages/analytics_page.py", title="Analytics", icon=":material/monitoring:"),
     st.Page("ui/pages/backtesting_page.py", title="Backtesting", icon=":material/history:"),
+    st.Page("ui/pages/validation_page.py", title="Validation", icon=":material/fact_check:"),
     st.Page("ui/pages/settings_page.py", title="Settings", icon=":material/settings:"),
 ]
 nav = st.navigation(pages)
