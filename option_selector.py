@@ -178,3 +178,69 @@ def get_previous_trading_day_ohlc(instrument_key, headers):
     candles_sorted = sorted(candles, key=lambda c: c[0])
     _, _open, high, low, close, _volume, _oi = candles_sorted[-1]
     return {"high": high, "low": low, "close": close}
+
+
+def get_orb_ladder(instrument_key, expiry_date, headers, selected_strike, selected_type, view,
+                    itm_count, strike_step):
+    """Read-only formalization of a Pine Script ORB-mapper concept (a user
+    request analyzed 2026-07-19): marks the OPPOSITE option type's real
+    9:15-9:20 opening-range extreme across a ladder of ITM strikes, on the
+    strike the user selected. Uses REAL option premiums (via
+    get_intraday_candles on the actual option instrument_key), not a
+    Black-Scholes simulation -- this is a live-data display feature, not a
+    backtest.
+
+    IMPORTANT: this generates NO trading signal. The original tool only
+    ever defined reference levels for a human to look at, never an entry
+    rule -- comparing a PUT's premium against a CALL-derived level (or vice
+    versa) mixes two different premium scales, so there's no dimensionally
+    sound way to turn this into an automatic buy/sell condition. This
+    function is wired into the dashboard as an informational panel only;
+    it is never read by scan_for_signal/handle_confirm and cannot affect
+    what gets traded.
+
+    Truth table (view, selected_type) -> (fetch_type, use_high):
+      TOP    + PUT  -> fetch CE, use High
+      TOP    + CALL -> fetch PE, use Low
+      BOTTOM + PUT  -> fetch CE, use Low
+      BOTTOM + CALL -> fetch PE, use High
+    ITM ladder direction: deeper-ITM calls sit at LOWER strikes, deeper-ITM
+    puts sit at HIGHER strikes.
+
+    Returns a list of dicts, one per rung (index 0 = the selected/"own"
+    strike): {index, strike, option_type, value, high_or_low}. value is
+    None if that leg's chain entry or 5-min candle data wasn't available.
+    """
+    fetch_type = "CE" if selected_type == "PUT" else "PE"
+    use_high = (view == "TOP" and selected_type == "PUT") or (view == "BOTTOM" and selected_type == "CALL")
+    ladder_step = -strike_step if fetch_type == "CE" else strike_step
+
+    chain = get_option_chain(expiry_date, headers, instrument_key=instrument_key)
+    chain_by_strike = {row["strike_price"]: row for row in chain}
+
+    results = []
+    for i in range(itm_count + 1):
+        strike = selected_strike + i * ladder_step
+        row = chain_by_strike.get(strike)
+        value = None
+        if row is not None:
+            leg = row["call_options"] if fetch_type == "CE" else row["put_options"]
+            opt_key = leg.get("instrument_key")
+            if opt_key:
+                try:
+                    candles = get_intraday_candles(opt_key, headers, interval_minutes=5)
+                except Exception:
+                    candles = None
+                if candles is not None and not candles.empty:
+                    first = candles.iloc[0]
+                    # Defensive: only trust this as the true 9:15 opening-
+                    # range candle if it actually starts at market open --
+                    # don't silently mislabel a later candle as the ORB if
+                    # Upstox's intraday feed ever doesn't start at 9:15.
+                    if first["timestamp"].strftime("%H:%M") == "09:15":
+                        value = float(first["high"] if use_high else first["low"])
+        results.append({
+            "index": i, "strike": strike, "option_type": fetch_type,
+            "value": value, "high_or_low": "High" if use_high else "Low",
+        })
+    return results

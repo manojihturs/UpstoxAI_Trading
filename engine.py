@@ -35,7 +35,7 @@ from signal_engine import compute_indicators, confirm_with_pcr
 from option_selector import (
     get_access_token, get_atm_option, get_intraday_candles, get_live_ltp,
     get_nearest_weekly_expiry, get_option_chain, compute_pcr, get_quotes,
-    get_previous_trading_day_ohlc,
+    get_previous_trading_day_ohlc, get_orb_ladder,
 )
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -208,6 +208,40 @@ def get_cached_prev_day_ohlc(instrument_states, name, cfg, headers):
     except Exception as e:
         print(f"{name}: failed to fetch previous-day OHLC for pivot point: {e}")
         return state.get("prev_day_ohlc")  # fall back to yesterday's cached value if any
+
+
+def refresh_orb_ladder_if_needed(headers, today):
+    """Read-only ORB Strike Mapper refresh (see option_selector.get_orb_ladder
+    for the full derivation and its dimensional-mismatch caveat). Computes
+    once per day, after 9:20 IST, and caches -- completely separate from
+    scan_for_signal()/manage_open_position(): it never reads a position,
+    never writes one, and its output (state_store.orb_levels) is read
+    ONLY by the dashboard display. A failure here is swallowed and logged,
+    never allowed to interrupt the main trading loop."""
+    settings = state_store.get_orb_settings()
+    if settings["selected_strike"] is None:
+        return  # user hasn't picked a strike from the dashboard yet
+    if state_store.get_orb_levels(today, settings["instrument"]):
+        return  # already computed today
+
+    if now_ist().time() < datetime.time(9, 20):
+        return  # today's opening-range candle hasn't closed yet
+
+    cfg = config.INSTRUMENTS.get(settings["instrument"])
+    if cfg is None:
+        return
+    try:
+        expiry = get_nearest_weekly_expiry(headers, instrument_key=cfg["spot_instrument_key"])
+        ladder = get_orb_ladder(
+            cfg["spot_instrument_key"], expiry, headers,
+            settings["selected_strike"], settings["selected_type"], settings["view"],
+            settings["itm_count"], cfg["strike_step"],
+        )
+        state_store.store_orb_levels(today, settings["instrument"], ladder)
+        log("ORB", f"ORB Strike Mapper levels locked: {settings['instrument']} "
+                    f"{settings['selected_type']} {settings['selected_strike']} (view={settings['view']})")
+    except Exception as e:
+        print(f"ERROR refreshing ORB ladder: {e}")
 
 
 def scan_for_signal(instrument_states, headers, today):
@@ -402,6 +436,20 @@ def process_control_requests(headers, today):
                 state_store.set_qty(instrument, new_qty)
                 log("QTY", f"Order quantity for {instrument} switched to {new_qty} "
                             f"(applies to NEW signals only, not the open position if any)")
+            elif req["kind"] == "SET_ORB_SETTINGS":
+                p = req["payload"]
+                old_instrument = state_store.get_orb_settings()["instrument"]
+                state_store.set_orb_settings(p["instrument"], p["view"], p["selected_type"],
+                                              p["selected_strike"], p["itm_count"])
+                # Invalidate today's cache (both the old and new instrument,
+                # in case the instrument itself changed) so the next cycle
+                # recomputes under the new settings instead of reusing a
+                # stale ladder from before the change.
+                state_store.clear_orb_levels(today, old_instrument)
+                state_store.clear_orb_levels(today, p["instrument"])
+                log("ORB", f"ORB Mapper settings updated: {p['instrument']} {p['selected_type']} "
+                            f"{p['selected_strike']} view={p['view']} itm={p['itm_count']} "
+                            f"(will recompute at/after next 9:20)")
         except Exception as e:
             print(f"ERROR handling control request {req['id']} ({req['kind']}): {e}")
         state_store.mark_control_request_handled(req["id"])
@@ -469,6 +517,14 @@ def main():
         try:
             refresh_spot_quotes(headers)
             state_store.expire_stale_pending_signals()
+
+            # Read-only informational panel -- isolated in its own
+            # try/except so a failure here (e.g. a bad expiry lookup)
+            # can never interrupt position management or signal scanning.
+            try:
+                refresh_orb_ladder_if_needed(headers, today)
+            except Exception as e:
+                print(f"ERROR in ORB ladder refresh: {e}")
 
             open_position = state_store.get_open_position()
             if open_position:

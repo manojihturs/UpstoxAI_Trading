@@ -142,6 +142,27 @@ def init_db():
                 pct_change REAL NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS orb_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                instrument TEXT NOT NULL DEFAULT 'NIFTY',
+                view TEXT NOT NULL DEFAULT 'TOP',
+                selected_type TEXT NOT NULL DEFAULT 'PUT',
+                selected_strike REAL,
+                itm_count INTEGER NOT NULL DEFAULT 4
+            );
+
+            CREATE TABLE IF NOT EXISTS orb_levels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                instrument TEXT NOT NULL,
+                ladder_index INTEGER NOT NULL,
+                strike REAL NOT NULL,
+                option_type TEXT NOT NULL,
+                value REAL,
+                high_or_low TEXT,
+                computed_at TEXT NOT NULL
+            );
             """
         )
         _migrate(conn)
@@ -635,6 +656,88 @@ def get_all_qty():
     return {name: get_qty(name) for name in INSTRUMENTS}
 
 
+# ------------------------------------------------------------- orb_settings
+# Read-only informational feature (see option_selector.get_orb_ladder) --
+# these settings never influence signal generation or position logic.
+
+def get_orb_settings():
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT * FROM orb_settings WHERE id = 1").fetchone()
+        if row is None:
+            conn.execute(
+                "INSERT INTO orb_settings (id, instrument, view, selected_type, selected_strike, itm_count) "
+                "VALUES (1, 'NIFTY', 'TOP', 'PUT', NULL, 4)"
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM orb_settings WHERE id = 1").fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+
+def set_orb_settings(instrument, view, selected_type, selected_strike, itm_count):
+    conn = _connect()
+    try:
+        conn.execute(
+            "INSERT INTO orb_settings (id, instrument, view, selected_type, selected_strike, itm_count) "
+            "VALUES (1, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET instrument = excluded.instrument, view = excluded.view, "
+            "selected_type = excluded.selected_type, selected_strike = excluded.selected_strike, "
+            "itm_count = excluded.itm_count",
+            (instrument, view, selected_type, selected_strike, itm_count),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# --------------------------------------------------------------- orb_levels
+
+def store_orb_levels(date_str, instrument, ladder):
+    """ladder: list of {index, strike, option_type, value, high_or_low}
+    (see option_selector.get_orb_ladder). Replaces any existing rows for
+    this date+instrument -- recomputed once per day, not appended to."""
+    conn = _connect()
+    try:
+        conn.execute("DELETE FROM orb_levels WHERE date = ? AND instrument = ?", (date_str, instrument))
+        for row in ladder:
+            conn.execute(
+                "INSERT INTO orb_levels (date, instrument, ladder_index, strike, option_type, value, "
+                "high_or_low, computed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (date_str, instrument, row["index"], row["strike"], row["option_type"],
+                 row["value"], row.get("high_or_low"), _now_iso()),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def clear_orb_levels(date_str, instrument):
+    """Invalidates today's cached ladder so refresh_orb_ladder_if_needed()
+    recomputes on its next cycle -- called whenever the settings change
+    mid-day, since the cache is otherwise keyed only by date+instrument
+    and wouldn't know a new strike/view/type was selected."""
+    conn = _connect()
+    try:
+        conn.execute("DELETE FROM orb_levels WHERE date = ? AND instrument = ?", (date_str, instrument))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_orb_levels(date_str, instrument):
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM orb_levels WHERE date = ? AND instrument = ? ORDER BY ladder_index",
+            (date_str, instrument),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------- engine_heartbeat
 
 def update_heartbeat(pid):
@@ -781,6 +884,8 @@ def get_dashboard_snapshot():
         "active_timeframe": get_active_timeframe(),
         "auto_confirm": get_auto_confirm(),
         "qty_by_instrument": get_all_qty(),
+        "orb_settings": (orb_settings := get_orb_settings()),
+        "orb_levels": get_orb_levels(today, orb_settings["instrument"]),
     }
 
 

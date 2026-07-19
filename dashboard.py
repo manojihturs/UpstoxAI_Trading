@@ -456,6 +456,62 @@ else:
 
 st.divider()
 
+# --------------------------------------------------- ORB strike mapper
+st.subheader("ORB Strike Mapper (Experimental, Read-Only)")
+st.caption(
+    "Formalizes a Pine Script concept (analyzed 2026-07-19): marks where the OPPOSITE option "
+    "type's real 9:15-9:20 opening-range extreme sits, across a ladder of ITM strikes on your "
+    "selected strike. **Purely informational** -- comparing a PUT's premium against a "
+    "CALL-derived level (or vice versa) mixes two different premium scales, so this does NOT "
+    "generate trading signals and has zero effect on entries, exits, or any other part of the "
+    "trading engine. Levels lock in once per day, right after 9:20 IST, using real option "
+    "premiums (not simulated)."
+)
+
+orb_settings = snapshot["orb_settings"]
+instrument_keys = list(config.INSTRUMENTS.keys())
+
+oc1, oc2, oc3, oc4, oc5 = st.columns(5)
+with oc1:
+    orb_instrument = st.selectbox(
+        "Instrument", instrument_keys,
+        index=instrument_keys.index(orb_settings["instrument"]) if orb_settings["instrument"] in instrument_keys else 0,
+        key="orb_instrument",
+    )
+with oc2:
+    orb_view = st.selectbox("View", ["TOP", "BOTTOM"],
+                             index=["TOP", "BOTTOM"].index(orb_settings["view"]), key="orb_view")
+with oc3:
+    orb_type = st.selectbox("Selected Type", ["PUT", "CALL"],
+                             index=["PUT", "CALL"].index(orb_settings["selected_type"]), key="orb_type")
+with oc4:
+    orb_step = config.INSTRUMENTS[orb_instrument]["strike_step"]
+    orb_strike_default = orb_settings["selected_strike"] or 0.0
+    orb_strike = st.number_input("Selected Strike", value=float(orb_strike_default), step=float(orb_step), key="orb_strike")
+with oc5:
+    orb_itm = st.number_input("ITM Count", min_value=0, max_value=10,
+                               value=orb_settings["itm_count"], key="orb_itm")
+
+if st.button("Update ORB Settings"):
+    state_store.create_control_request("SET_ORB_SETTINGS", {
+        "instrument": orb_instrument, "view": orb_view, "selected_type": orb_type,
+        "selected_strike": orb_strike, "itm_count": int(orb_itm),
+    })
+    st.rerun()
+
+today_orb_levels = snapshot["orb_levels"]
+if orb_settings["selected_strike"] is None:
+    st.info("Pick a strike above and click \"Update ORB Settings\" to start tracking.")
+elif not today_orb_levels:
+    st.info("No levels yet today -- waiting for the 9:15-9:20 opening-range candle to close "
+            "(or settings were just changed and haven't recomputed yet).")
+else:
+    orb_df = pd.DataFrame(today_orb_levels)[["ladder_index", "strike", "option_type", "high_or_low", "value"]]
+    orb_df = orb_df.rename(columns={"ladder_index": "rung (0=own strike)"})
+    st.dataframe(orb_df, use_container_width=True, hide_index=True)
+
+st.divider()
+
 # --------------------------------------------------------- strategy analysis
 st.subheader("Strategy Analysis (Historical Backtest)")
 st.caption(
