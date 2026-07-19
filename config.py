@@ -72,6 +72,27 @@ RISK = {
     # point is to force a real pause, not silently resume on a small uptick.
     "ENABLE_CUMULATIVE_DRAWDOWN_BREAKER": True,
     "MAX_CUMULATIVE_DRAWDOWN": 15000,  # rupees; 30% of CAPITAL above
+
+    # Caps entries taken in a single day, independent of the rupee daily
+    # loss cap above. Found live (2026-07-17) that a race condition let 12
+    # trades execute in one afternoon when only ~5 were real distinct
+    # signals -- see state_store.open_position()'s docstring for that fix.
+    # Even with the race fixed, this cap is a second, independent
+    # guardrail against a chattier-than-expected strategy/timeframe combo
+    # racking up brokerage (~Rs 55-60/round-trip observed live) on
+    # marginal signals. Derived fresh from today's closed_positions count
+    # every cycle, so it auto-resets at the next day's first signal --
+    # not a sticky flag needing manual reset.
+    "MAX_TRADES_PER_DAY": 6,
+
+    # After this many LOSING trades in a row (same day), pause new entries
+    # for the rest of the day. A short losing streak is normal, but
+    # several consecutive losses in one session usually means the active
+    # strategy is fighting a choppy/whipsaw regime it wasn't designed for
+    # -- not "due for a win." Resets the moment a winning trade breaks the
+    # streak, and again at the next day's first trade (also derived fresh
+    # from today's closed_positions, not a sticky flag).
+    "MAX_CONSECUTIVE_LOSSES": 2,
 }
 
 # ---- Auto-confirm ----
