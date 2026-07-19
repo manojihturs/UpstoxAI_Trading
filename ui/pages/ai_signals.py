@@ -42,6 +42,11 @@ else:
                   f"| Strike {pending['strike']:.0f} | Expiry {pending['expiry']} | "
                   f"Timeframe {snapshot['active_timeframe']}min. Go to Live Trading to Confirm/Reject.",
     )
+    st.caption(
+        "Entry/Stop/Target above are **estimates** off the proposed premium -- engine.py "
+        "re-fetches a fresh live price and applies slippage at the moment you actually confirm, "
+        "so the real fill can differ."
+    )
 
 st.markdown("<br>", unsafe_allow_html=True)
 components.section_header("Signal History")

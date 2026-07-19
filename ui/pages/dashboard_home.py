@@ -106,7 +106,11 @@ with col_signal:
             reasoning=f"Rule-based signal from the active strategy, strike {pending['strike']:.0f}, "
                       f"expiry {pending['expiry']}.",
         )
-        st.caption("Go to **Live Trading** to Confirm or Reject this signal.")
+        st.caption(
+            "Entry/Stop/Target above are **estimates** off the proposed premium -- engine.py "
+            "re-fetches a fresh live price and applies slippage at the moment you actually "
+            "confirm, so the real fill can differ. Go to **Live Trading** to Confirm or Reject."
+        )
 
 with col_position:
     components.section_header("Open Position")
