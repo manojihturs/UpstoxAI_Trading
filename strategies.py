@@ -89,6 +89,113 @@ def signal_pivot_point(row):
     return None
 
 
+# ------------------------------------------------------- swing structure
+
+SWING_LOOKBACK = 2  # bars each side -- a standard 5-bar fractal (Bill Williams-style)
+
+
+def compute_swing_levels(df, lookback=SWING_LOOKBACK):
+    """Well-defined swing high/low ("market structure") detector -- built
+    after reviewing a YouTube video (2026-07-19) whose "DP Low" support
+    tracking had no fixed formula and was revised mid-session based on
+    hindsight, making it impossible to encode as a forward-looking rule.
+    This is a genuine, standard technical construct instead: a fractal
+    swing high/low at bar i is confirmed once `lookback` bars have passed
+    on both sides without a higher high / lower low -- i.e. bar i's high
+    is the strict max (bar i's low is the strict min) of the
+    2*lookback+1-bar window centered on it.
+
+    Confirmation necessarily lags by `lookback` bars (you can't know bar i
+    was a swing point until `lookback` bars after it have failed to beat
+    it) -- implemented via .shift(lookback), so no future bar is ever used
+    to decide today's signal. Once confirmed, a swing level holds (via
+    ffill) until a NEW swing point in the same direction is confirmed --
+    it is never manually revised, unlike the video's discretionary
+    approach.
+
+    Returns (last_swing_high, last_swing_low): for each row, the most
+    recently CONFIRMED swing high/low as of that row (NaN before the
+    first one is confirmed).
+    """
+    highs = df["high"].to_numpy()
+    lows = df["low"].to_numpy()
+    n = len(df)
+    swing_high = np.full(n, np.nan)
+    swing_low = np.full(n, np.nan)
+
+    for i in range(lookback, n - lookback):
+        window_high = highs[i - lookback: i + lookback + 1]
+        if highs[i] == window_high.max() and (window_high == highs[i]).sum() == 1:
+            swing_high[i] = highs[i]
+        window_low = lows[i - lookback: i + lookback + 1]
+        if lows[i] == window_low.min() and (window_low == lows[i]).sum() == 1:
+            swing_low[i] = lows[i]
+
+    swing_high_confirmed = pd.Series(swing_high, index=df.index).shift(lookback)
+    swing_low_confirmed = pd.Series(swing_low, index=df.index).shift(lookback)
+    return swing_high_confirmed.ffill(), swing_low_confirmed.ffill()
+
+
+def signal_swing_structure(row):
+    """Break-of-structure signal: CE when price closes above the most
+    recently confirmed swing high (an upside structure break), PE when it
+    closes below the most recently confirmed swing low. Needs
+    last_swing_high/last_swing_low columns from prepare_columns() (see
+    compute_swing_levels)."""
+    if _row_time(row) > LAST_ENTRY_TIME:
+        return None
+    swing_high = row.get("last_swing_high")
+    swing_low = row.get("last_swing_low")
+    prev_close = row.get("prev_close")
+    if any(v is None or pd.isna(v) for v in (swing_high, swing_low, prev_close)):
+        return None
+    close = row["close"]
+    if prev_close <= swing_high and close > swing_high:
+        return "CE"
+    if prev_close >= swing_low and close < swing_low:
+        return "PE"
+    return None
+
+
+DOJI_BODY_RATIO_MAX = 0.1  # body <= 10% of the candle's total range
+
+
+def is_doji(row, body_ratio_max=DOJI_BODY_RATIO_MAX):
+    o, c, h, l = row.get("open"), row["close"], row["high"], row["low"]
+    if o is None or pd.isna(o):
+        return False
+    candle_range = h - l
+    if candle_range <= 0:
+        return False
+    return abs(c - o) / candle_range <= body_ratio_max
+
+
+def is_inside_bar(row):
+    prev_high, prev_low = row.get("prev_high"), row.get("prev_low")
+    if prev_high is None or prev_low is None or pd.isna(prev_high) or pd.isna(prev_low):
+        return False
+    return row["high"] <= prev_high and row["low"] >= prev_low
+
+
+def signal_swing_structure_candle_confirmed(row):
+    """Same break-of-structure signal as signal_swing_structure(), gated
+    by the ONLY two candlestick patterns a Tamil YouTube trading channel
+    (analyzed 2026-07-19, multiple videos) explicitly stated it uses as
+    reversal-timing triggers: Doji and Inside Bar. Unlike that channel's
+    "DP Low" tracking (discretionary, revised mid-session with no fixed
+    rule -- not automatable, see strategies.py history), Doji/Inside Bar
+    are precisely defined, standard technical constructs, so this is a
+    genuinely faithful mechanical stand-in for that specific piece of the
+    method. Needs prev_high/prev_low in addition to whatever
+    signal_swing_structure needs."""
+    base_signal = signal_swing_structure(row)
+    if base_signal is None:
+        return None
+    if is_doji(row) or is_inside_bar(row):
+        return base_signal
+    return None
+
+
 def signal_option_level_confirmation(row):
     """Formalizes a support/resistance idea from a Tamil YouTube options-
     education video (analyzed 2026-07-19): each day's previous-day-close
@@ -219,6 +326,14 @@ STRATEGIES = {
         "label": "Pivot point crossover (previous day's PP)",
         "signal_fn": signal_pivot_point,
     },
+    "SWING_STRUCTURE": {
+        "label": "Swing structure break (fractal swing high/low)",
+        "signal_fn": signal_swing_structure,
+    },
+    "SWING_STRUCTURE_CANDLE_CONFIRMED": {
+        "label": "Swing structure break + Doji/Inside Bar confirmation",
+        "signal_fn": signal_swing_structure_candle_confirmed,
+    },
     "UT_BOT_STANDARD": {
         "label": "UT Bot (ATR trailing stop, KeyValue=1, ATR=10)",
         "signal_fn": signal_ut_bot_standard,
@@ -267,5 +382,9 @@ def prepare_columns(df, prev_day_ohlc=None):
         stop = compute_ut_bot_trailing_stop(df, params["key_value"], params["atr_period"])
         df[col] = stop
         df[col + "_prev"] = stop.shift(1)
+
+    df["last_swing_high"], df["last_swing_low"] = compute_swing_levels(df)
+    df["prev_high"] = df["high"].shift(1)
+    df["prev_low"] = df["low"].shift(1)
 
     return df

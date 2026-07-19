@@ -161,11 +161,125 @@ def test_get_signal_for_strategy_falls_back_to_default_on_unknown():
 
 
 def test_all_strategies_registered():
-    assert len(strategies.STRATEGIES) == 7
+    assert len(strategies.STRATEGIES) == 9
     assert set(strategies.STRATEGIES) == {
         "BASELINE", "EMA50_TREND_FILTER", "STRICT_ADX", "CONFIRMATION_CANDLE", "PIVOT_POINT",
-        "UT_BOT_STANDARD", "UT_BOT_CONSERVATIVE",
+        "SWING_STRUCTURE", "SWING_STRUCTURE_CANDLE_CONFIRMED", "UT_BOT_STANDARD", "UT_BOT_CONSERVATIVE",
     }
+
+
+def test_compute_swing_levels_detects_fractal_high():
+    # lookback=2 -> 5-bar window; index 3's high (15) is the strict max
+    # of highs[1:6] = [11, 12, 15, 12, 11] -> confirmed at index 3+2=5
+    df = pd.DataFrame({
+        "high": [10, 11, 12, 15, 12, 11, 10, 9, 8, 9, 10],
+        "low":  [9,  10, 11, 14, 11, 10, 9,  8, 7, 8, 9],
+    })
+    swing_high, swing_low = strategies.compute_swing_levels(df, lookback=2)
+    assert pd.isna(swing_high.iloc[4])  # not yet confirmed
+    assert swing_high.iloc[5] == 15.0   # confirmed exactly 2 bars later
+    assert swing_high.iloc[8] == 15.0   # holds (ffill) until a new one confirms
+
+
+def test_compute_swing_levels_detects_fractal_low():
+    # index 3's low (2) is the strict min of lows[1:6] -> confirmed at index 5
+    df = pd.DataFrame({
+        "high": [10, 9, 8, 5, 8, 9, 10, 11, 12, 11, 10],
+        "low":  [9,  8, 7, 2, 7, 8, 9,  10, 11, 10, 9],
+    })
+    swing_high, swing_low = strategies.compute_swing_levels(df, lookback=2)
+    assert pd.isna(swing_low.iloc[4])
+    assert swing_low.iloc[5] == 2.0
+
+
+def test_swing_structure_ce_on_upward_break():
+    row = make_row(last_swing_high=24100.0, last_swing_low=23900.0,
+                    prev_close=24090.0, close=24110.0)
+    assert strategies.signal_swing_structure(row) == "CE"
+
+
+def test_swing_structure_pe_on_downward_break():
+    row = make_row(last_swing_high=24100.0, last_swing_low=23900.0,
+                    prev_close=23910.0, close=23890.0)
+    assert strategies.signal_swing_structure(row) == "PE"
+
+
+def test_swing_structure_none_inside_range():
+    row = make_row(last_swing_high=24100.0, last_swing_low=23900.0,
+                    prev_close=24000.0, close=24010.0)
+    assert strategies.signal_swing_structure(row) is None
+
+
+def test_swing_structure_none_when_levels_missing():
+    row = make_row(last_swing_high=None, last_swing_low=None,
+                    prev_close=24000.0, close=24010.0)
+    assert strategies.signal_swing_structure(row) is None
+
+
+def test_swing_structure_respects_last_entry_time():
+    row = make_row(last_swing_high=24100.0, last_swing_low=23900.0,
+                    prev_close=24090.0, close=24110.0,
+                    timestamp=pd.Timestamp("2026-07-17 15:00:00"))
+    assert strategies.signal_swing_structure(row) is None
+
+
+def test_is_doji_true_for_small_body():
+    row = make_row(open=100.0, close=100.05, high=101.0, low=99.0)
+    assert strategies.is_doji(row) is True
+
+
+def test_is_doji_false_for_large_body():
+    row = make_row(open=99.0, close=101.0, high=101.2, low=98.8)
+    assert strategies.is_doji(row) is False
+
+
+def test_is_doji_false_when_open_missing():
+    row = make_row(open=None, close=100.0, high=101.0, low=99.0)
+    assert strategies.is_doji(row) is False
+
+
+def test_is_inside_bar_true_when_contained():
+    row = make_row(high=100.5, low=99.5, prev_high=101.0, prev_low=99.0)
+    assert strategies.is_inside_bar(row) is True
+
+
+def test_is_inside_bar_false_when_breaks_prev_range():
+    row = make_row(high=101.5, low=99.5, prev_high=101.0, prev_low=99.0)
+    assert strategies.is_inside_bar(row) is False
+
+
+def test_is_inside_bar_false_when_prev_missing():
+    row = make_row(high=100.5, low=99.5, prev_high=None, prev_low=None)
+    assert strategies.is_inside_bar(row) is False
+
+
+def test_swing_structure_candle_confirmed_fires_on_doji_breakout():
+    row = make_row(
+        last_swing_high=24100.0, last_swing_low=23900.0,
+        prev_close=24090.0, close=24110.0,
+        open=24109.0, high=24111.0, low=24089.0,  # small body -> doji
+    )
+    assert strategies.signal_swing_structure_candle_confirmed(row) == "CE"
+
+
+def test_swing_structure_candle_confirmed_blocks_without_candle_pattern():
+    row = make_row(
+        last_swing_high=24100.0, last_swing_low=23900.0,
+        prev_close=24090.0, close=24110.0,
+        open=24000.0, high=24111.0, low=23990.0,  # big body, not inside prev range either
+        prev_high=24050.0, prev_low=24040.0,
+    )
+    assert strategies.signal_swing_structure_candle_confirmed(row) is None
+
+
+def test_swing_structure_candle_confirmed_fires_on_inside_bar():
+    row = make_row(
+        last_swing_high=24100.0, last_swing_low=23900.0,
+        prev_close=24090.0, close=24110.0,
+        open=24095.0, high=24105.0, low=24098.0,  # big-ish body, but inside prev bar
+        prev_high=24150.0, prev_low=24050.0,
+    )
+    assert strategies.signal_swing_structure_candle_confirmed(row) == "CE"
 
 
 def test_prepare_columns_does_not_clobber_existing_pivot_pp():
