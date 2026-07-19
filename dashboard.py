@@ -29,6 +29,7 @@ import state_store
 import engine
 import strategies
 import cost_model
+import live_validation
 
 st.set_page_config(page_title="Paper Trading Dashboard", layout="wide")
 
@@ -529,3 +530,74 @@ else:
             "- Signals fire relatively rarely (roughly once every several trading hours per "
             "instrument) -- a day or two with zero trades is expected, not a malfunction."
         )
+
+# ------------------------------------------------------------------ validation
+# The actual evidence a real-money go/no-go decision should be based on --
+# compares live paper trading (real Upstox premiums) against the backtest's
+# held-out TEST-window expectation for the currently active strategy, with a
+# sample-size-aware significance test on win rate instead of eyeballing a
+# P&L number. See GO_NO_GO_CHECKLIST.md for the concrete numeric gates this
+# feeds into. Read-only, same pattern as everything else on this page.
+st.header("Validation")
+st.caption(
+    "Is live paper trading actually tracking the backtest, or diverging from it? "
+    "This is the evidence to base a real-money decision on -- not the raw P&L number alone."
+)
+_validation_strategy_label = strategies.STRATEGIES.get(current_strategy, {}).get("label", current_strategy)
+st.markdown(f"**Strategy being validated:** {_validation_strategy_label}")
+st.caption(
+    "Only trades closed while THIS strategy was active are meaningful here -- if you've been "
+    "switching strategies, older trades under a different rule set don't belong in this "
+    "comparison. This section doesn't currently filter by which strategy was active per-trade "
+    "(that isn't tracked on the positions table yet); treat the numbers below as roughly "
+    "indicative until that's added."
+)
+
+_closed_positions = state_store.get_closed_positions(limit=100000)
+_validation_result = live_validation.compare_live_vs_backtest(current_strategy, _closed_positions)
+_live = _validation_result["live"]
+_baseline = _validation_result["backtest_baseline"]
+
+if _live is None:
+    st.info("No closed live trades yet -- nothing to validate until at least one trade completes.")
+else:
+    v1, v2, v3, v4 = st.columns(4)
+    v1.metric("Live trades", _live["total_trades"])
+    v2.metric("Live win rate", f"{_live['win_rate_pct']}%", f"{_live['wins']}W / {_live['losses']}L")
+    v3.metric("Live total P&L", f"Rs {_live['total_pnl']:,.2f}")
+    v4.metric("Live max drawdown", f"Rs {_live['max_drawdown']:,.2f}")
+
+    _sig = _live["significance"]
+    if _sig and _sig["p_value"] is not None:
+        st.caption(
+            f"Win rate significance vs. a coin-flip (50%): p-value {_sig['p_value']} "
+            f"({'statistically significant' if _sig['significant'] else 'NOT statistically significant'} "
+            f"at the usual 0.05 threshold). Tests whether the win rate is reliably different from "
+            f"random, not whether the strategy is profitable -- read it alongside the P&L above."
+        )
+
+    if _baseline is None:
+        st.warning(
+            "No backtest_experiments_results.csv found -- run `python backtest_experiments.py` "
+            "locally to generate a baseline to compare against."
+        )
+    else:
+        st.markdown(f"**Backtest baseline** (held-out TEST window, {_baseline['trades']} trades):")
+        w1, w2 = st.columns(2)
+        w1.metric("Backtest win rate", f"{_baseline['win_rate_pct']}%")
+        w2.metric("Backtest total P&L", f"Rs {_baseline['total_pnl']:,.2f}")
+
+    st.markdown(f"**Verdict:** {_validation_result['verdict']}")
+
+with st.expander("Why this matters before real money"):
+    st.markdown(
+        "- The backtest numbers above come from **simulated** option premiums -- see the "
+        "caveat above. Simulated premiums obey put-call parity exactly, which real premiums "
+        "don't; real spread, skew, and liquidity effects are invisible to that model.\n"
+        "- Live paper trading uses REAL option premiums fetched from Upstox, so this "
+        "comparison is the actual test of whether the backtest's simulated edge survives "
+        "contact with real market prices.\n"
+        "- A `p_value < 0.05` above means the win rate is reliably not 50/50 -- it does NOT "
+        "mean the strategy is proven safe for real money. See **GO_NO_GO_CHECKLIST.md** in "
+        "the repo root for the actual numeric gates that decision should be based on."
+    )
