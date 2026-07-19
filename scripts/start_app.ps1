@@ -12,6 +12,11 @@ launch Streamlit itself every morning.
 
 If the app is already running (port already listening), this is a no-op --
 safe to run more than once without spawning duplicate engine loops.
+
+Respects auto_mode in .streamlit/secrets.toml: auto_mode = false skips the
+scheduled launch entirely (task still fires at 09:10, it just does nothing),
+so you can flip auto-start off on days you don't want to trade without
+touching Task Scheduler itself.
 #>
 
 $ErrorActionPreference = "Stop"
@@ -22,10 +27,27 @@ $DateStamp = Get-Date -Format "yyyy-MM-dd"
 $LauncherLog = Join-Path $LogDir "launcher.log"
 $StdOutLog = Join-Path $LogDir ("app_{0}.log" -f $DateStamp)
 $StdErrLog = Join-Path $LogDir ("app_{0}_err.log" -f $DateStamp)
+$SecretsFile = Join-Path $RepoRoot ".streamlit\secrets.toml"
 $Port = 8503
 
 if (-not (Test-Path $LogDir)) {
     New-Item -ItemType Directory -Path $LogDir | Out-Null
+}
+
+# Minimal TOML read -- just this one bool key, not a general parser. Missing
+# file or missing key both default to auto_mode = true (fail toward the
+# existing always-on behavior rather than silently never starting).
+$AutoMode = $true
+if (Test-Path $SecretsFile) {
+    $line = Select-String -Path $SecretsFile -Pattern '^\s*auto_mode\s*=\s*(true|false)\s*$' -CaseSensitive:$false
+    if ($line) {
+        $AutoMode = ($line.Matches[0].Groups[1].Value.ToLower() -eq "true")
+    }
+}
+
+if (-not $AutoMode) {
+    Add-Content -Path $LauncherLog -Value "$(Get-Date -Format o) - auto_mode is false in secrets.toml, skipping scheduled start."
+    exit 0
 }
 
 $listening = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
