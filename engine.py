@@ -321,6 +321,16 @@ def handle_confirm(signal_id, headers, today):
         log("REJECTED", f"Confirm rejected for signal {signal_id}: cumulative drawdown breaker is tripped")
         return
 
+    if state_store.get_today_trade_count(today) >= config.RISK["MAX_TRADES_PER_DAY"]:
+        state_store.set_pending_signal_status(signal_id, "REJECTED")
+        log("REJECTED", f"Confirm rejected for signal {signal_id}: daily trade cap reached")
+        return
+
+    if state_store.get_consecutive_losses(today) >= config.RISK["MAX_CONSECUTIVE_LOSSES"]:
+        state_store.set_pending_signal_status(signal_id, "REJECTED")
+        log("REJECTED", f"Confirm rejected for signal {signal_id}: consecutive-loss cooldown active")
+        return
+
     if state_store.get_open_position():
         state_store.set_pending_signal_status(signal_id, "REJECTED")
         log("REJECTED", f"Confirm rejected for signal {signal_id}: a position is already open")
@@ -338,9 +348,19 @@ def handle_confirm(signal_id, headers, today):
     initial_sl = entry_net - sl_points
     target_price = entry_net + config.INSTRUMENTS[sig["instrument"]]["target_points"]
 
-    state_store.open_position(sig["instrument"], sig["direction"], sig["strike"], sig["expiry"],
-                               sig["instrument_key"], sig["qty"], raw_ltp, entry_net,
-                               initial_sl, target_price)
+    new_position_id = state_store.open_position(
+        sig["instrument"], sig["direction"], sig["strike"], sig["expiry"],
+        sig["instrument_key"], sig["qty"], raw_ltp, entry_net, initial_sl, target_price)
+    if new_position_id is None:
+        # The earlier get_open_position() check above passed, but another
+        # engine loop (e.g. a second process against the same DB) won the
+        # atomic insert first -- open_position() is the real, race-proof
+        # guard; this check was just a cheap early-exit. Treat exactly
+        # like the early rejection above, not as a silent no-op.
+        state_store.set_pending_signal_status(signal_id, "REJECTED")
+        log("REJECTED", f"Confirm rejected for signal {signal_id}: a position is already open "
+                         f"(lost the race to another engine instance)")
+        return
     state_store.set_pending_signal_status(signal_id, "CONFIRMED")
     log("ENTRY", f"ENTRY: {sig['instrument']} {sig['direction']} {sig['strike']} @ net {entry_net:.2f} "
                   f"(raw {raw_ltp:.2f}) SL={initial_sl:.2f} target={target_price:.2f}")
@@ -396,9 +416,24 @@ def main():
     separate worker process -- see ensure_background_thread())."""
     log("LIFECYCLE", f"Trading engine started. IST time: {now_ist()}")
 
+    existing_heartbeat = state_store.get_heartbeat()
+    if existing_heartbeat and existing_heartbeat.get("pid") not in (None, os.getpid()):
+        last_poll = existing_heartbeat.get("last_poll_at")
+        if last_poll:
+            age_seconds = (datetime.datetime.now() - datetime.datetime.fromisoformat(last_poll)).total_seconds()
+            if age_seconds < config.TIMING["ENGINE_POLL_INTERVAL_SECONDS"] * 3:
+                log("LIFECYCLE",
+                    f"WARNING: another engine instance (PID {existing_heartbeat['pid']}) polled "
+                    f"{age_seconds:.0f}s ago against this same trading_state.db -- running two "
+                    f"engine loops at once causes duplicate signals/log spam (open_position() "
+                    f"itself is now race-proof, so this can no longer duplicate positions, but "
+                    f"it's still wasteful). Stop the other dashboard/app process if unintended.")
+
     instrument_states = {name: {"last_candle_ts": None} for name in config.INSTRUMENTS}
     poll_seconds = config.TIMING["ENGINE_POLL_INTERVAL_SECONDS"]
     market_was_open = None  # tracks transitions so status messages don't spam every cycle
+    trade_cap_logged_for = None       # date string, so the MAX_TRADES_PER_DAY block logs once/day
+    loss_cooldown_logged_for = None   # date string, so the MAX_CONSECUTIVE_LOSSES block logs once/day
 
     while True:
         now = now_ist()
@@ -442,7 +477,23 @@ def main():
                 summary = state_store.recompute_daily_summary(today, config.RISK["DAILY_LOSS_CAP"])
                 pending = state_store.get_pending_signal()
                 cumulative_tripped = check_cumulative_drawdown_breaker()
+
+                trade_count_today = state_store.get_today_trade_count(today)
+                trade_cap_hit = trade_count_today >= config.RISK["MAX_TRADES_PER_DAY"]
+                if trade_cap_hit and trade_cap_logged_for != today:
+                    log("BREAKER", f"Daily trade cap reached ({trade_count_today}/"
+                                    f"{config.RISK['MAX_TRADES_PER_DAY']}) -- no new entries until tomorrow.")
+                    trade_cap_logged_for = today
+
+                consecutive_losses = state_store.get_consecutive_losses(today)
+                loss_cooldown_hit = consecutive_losses >= config.RISK["MAX_CONSECUTIVE_LOSSES"]
+                if loss_cooldown_hit and loss_cooldown_logged_for != today:
+                    log("BREAKER", f"{consecutive_losses} consecutive losing trades today -- "
+                                    f"pausing new entries for the rest of the day (cooldown).")
+                    loss_cooldown_logged_for = today
+
                 if (not pending and not summary["circuit_breaker_tripped"] and not cumulative_tripped
+                        and not trade_cap_hit and not loss_cooldown_hit
                         and current_time <= config.TIMING["LAST_ENTRY_TIME"]):
                     scan_for_signal(instrument_states, headers, today)
         except Exception as e:

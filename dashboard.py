@@ -255,7 +255,7 @@ m1, m2, m3, m4 = st.columns(4)
 m1.metric("Capital", f"Rs {config.RISK['CAPITAL']:,.0f}")
 m2.metric("Today's Net P&L", f"Rs {realized_net_pnl:,.2f}")
 m3.metric("Remaining Loss Budget", f"Rs {max(remaining_budget, 0):,.2f}", f"of Rs {daily_cap:,.0f} cap")
-m4.metric("Trades Today", trades_count)
+m4.metric("Trades Today", f"{trades_count} / {config.RISK['MAX_TRADES_PER_DAY']}")
 
 if summary["circuit_breaker_tripped"]:
     st.error(
@@ -266,6 +266,34 @@ if summary["circuit_breaker_tripped"]:
     if st.button("Reset Circuit Breaker (testing only)"):
         state_store.create_control_request("RESET_BREAKER")
         st.rerun()
+
+if trades_count >= config.RISK["MAX_TRADES_PER_DAY"]:
+    st.warning(
+        f"Daily trade cap reached ({trades_count}/{config.RISK['MAX_TRADES_PER_DAY']}) -- "
+        f"no new entries until tomorrow. Any position already open keeps running its own SL/TSL/target."
+    )
+
+# consecutive-loss cooldown: counts backwards from today's most recent
+# closed trade, stopping at the first win -- same logic as
+# state_store.get_consecutive_losses(), computed here from the snapshot
+# already in hand instead of a second DB round trip.
+today_closed_desc = sorted(today_closed, key=lambda p: p["exit_time"] or "", reverse=True)
+consecutive_losses = 0
+for p in today_closed_desc:
+    if p["net_pnl"] is not None and p["net_pnl"] <= 0:
+        consecutive_losses += 1
+    else:
+        break
+if consecutive_losses >= config.RISK["MAX_CONSECUTIVE_LOSSES"]:
+    st.warning(
+        f"{consecutive_losses} consecutive losing trades today -- new entries paused "
+        f"(cooldown) for the rest of the day."
+    )
+elif consecutive_losses > 0:
+    st.caption(
+        f"Consecutive losing trades today: {consecutive_losses} "
+        f"(cooldown triggers at {config.RISK['MAX_CONSECUTIVE_LOSSES']})."
+    )
 
 # per-instrument breakdown for today
 if today_closed:

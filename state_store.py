@@ -235,6 +235,19 @@ def expire_stale_pending_signals():
 
 def open_position(instrument, direction, strike, expiry, instrument_key, qty,
                    entry_ltp_raw, entry_ltp_net, initial_sl, target_price):
+    """Atomically opens a position ONLY if no other position is already
+    OPEN. The INSERT...SELECT...WHERE NOT EXISTS runs as a single SQL
+    statement/transaction, which SQLite's single-writer lock (see
+    _connect()'s WAL + busy_timeout) serializes across every connection --
+    unlike a separate get_open_position() check followed by a second
+    open_position() call, which is TWO round trips and can race: found
+    live (2026-07-17) that two engine.py background threads running
+    against the same trading_state.db (one from dashboard.py, one from a
+    UI-redesign preview instance) both read "no open position" before
+    either had committed, opening 2-4 simultaneous positions on the same
+    signal. Returns the new row's id, or None if another position was
+    already open -- callers MUST treat None as a rejection, not proceed
+    as if the position opened."""
     conn = _connect()
     try:
         cur = conn.execute(
@@ -242,13 +255,14 @@ def open_position(instrument, direction, strike, expiry, instrument_key, qty,
                (instrument, direction, strike, expiry, instrument_key, qty,
                 entry_time, entry_ltp_raw, entry_ltp_net, initial_sl, current_sl,
                 tsl_armed, target_price, status)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'OPEN')""",
+               SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'OPEN'
+               WHERE NOT EXISTS (SELECT 1 FROM positions WHERE status = 'OPEN')""",
             (instrument, direction, strike, expiry, instrument_key, qty,
              _now_iso(), entry_ltp_raw, entry_ltp_net, initial_sl, initial_sl,
              target_price),
         )
         conn.commit()
-        return cur.lastrowid
+        return cur.lastrowid if cur.rowcount > 0 else None
     finally:
         conn.close()
 
@@ -336,6 +350,26 @@ def get_closed_positions_for_date(date_str):
         return [dict(r) for r in rows]
     finally:
         conn.close()
+
+
+def get_today_trade_count(date_str=None):
+    date_str = date_str or _today_str()
+    return len(get_closed_positions_for_date(date_str))
+
+
+def get_consecutive_losses(date_str=None):
+    """Counts consecutive LOSING trades (net_pnl <= 0) ending at today's
+    most recent closed trade, stopping at the first win. Cheap: at most a
+    handful of rows per day."""
+    date_str = date_str or _today_str()
+    today_closed = sorted(get_closed_positions_for_date(date_str), key=lambda p: p["exit_time"], reverse=True)
+    streak = 0
+    for p in today_closed:
+        if p["net_pnl"] is not None and p["net_pnl"] <= 0:
+            streak += 1
+        else:
+            break
+    return streak
 
 
 # ------------------------------------------------------------------ daily_summary
