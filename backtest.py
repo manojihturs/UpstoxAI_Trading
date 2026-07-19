@@ -100,6 +100,64 @@ def add_pivot_column(df):
     return df.drop(columns=["_date"])
 
 
+def add_option_level_columns(df, cfg):
+    """Formalizes a support/resistance idea from a Tamil YouTube options-
+    education video (analyzed 2026-07-19): each day, the PREVIOUS day's
+    closing spot + realized vol is used to Black-Scholes-price the ATM
+    strike's one-step OTM call and put; their average becomes a
+    "confirmation level" for that whole day. Intraday, BOTH the live
+    (BS-simulated) CE and PE premiums at that same fixed strike are
+    compared against the level -- see strategies.signal_option_level_
+    confirmation for the entry rule and an important caveat about what
+    this backtest can and can't prove, since simulated premiums obey
+    put-call parity exactly by construction (real premiums don't always).
+
+    Backtest-only, mirrors add_pivot_column()'s pattern: adds
+    option_atm_strike / option_confirm_level / option_ce_live /
+    option_pe_live / option_ce_live_prev / option_pe_live_prev columns.
+    """
+    df = df.copy()
+    df["_date"] = df["timestamp"].dt.date
+    daily_close = df.groupby("_date")["close"].last()
+    daily_sigma = df.groupby("_date")["realized_vol"].last()
+    prev_close_by_date = daily_close.shift(1)
+    prev_sigma_by_date = daily_sigma.shift(1)
+
+    years_to_expiry = ASSUMED_DAYS_TO_EXPIRY / 365
+    strike_by_date = {}
+    level_by_date = {}
+    for date in df["_date"].unique():
+        pc = prev_close_by_date.get(date)
+        ps = prev_sigma_by_date.get(date)
+        if pd.isna(pc) or pd.isna(ps):
+            strike_by_date[date] = np.nan
+            level_by_date[date] = np.nan
+            continue
+        atm_strike = round_to_atm(pc, cfg["strike_step"])
+        otm_ce = black_scholes_price(pc, atm_strike + cfg["strike_step"], years_to_expiry,
+                                      RISK_FREE_RATE, ps, "CE")
+        otm_pe = black_scholes_price(pc, atm_strike - cfg["strike_step"], years_to_expiry,
+                                      RISK_FREE_RATE, ps, "PE")
+        strike_by_date[date] = atm_strike
+        level_by_date[date] = (otm_ce + otm_pe) / 2
+
+    df["option_atm_strike"] = df["_date"].map(strike_by_date)
+    df["option_confirm_level"] = df["_date"].map(level_by_date)
+
+    def _live_premiums(row):
+        strike = row["option_atm_strike"]
+        if pd.isna(strike):
+            return pd.Series({"option_ce_live": np.nan, "option_pe_live": np.nan})
+        ce = black_scholes_price(row["close"], strike, years_to_expiry, RISK_FREE_RATE, row["realized_vol"], "CE")
+        pe = black_scholes_price(row["close"], strike, years_to_expiry, RISK_FREE_RATE, row["realized_vol"], "PE")
+        return pd.Series({"option_ce_live": ce, "option_pe_live": pe})
+
+    df = df.join(df.apply(_live_premiums, axis=1))
+    df["option_ce_live_prev"] = df["option_ce_live"].shift(1)
+    df["option_pe_live_prev"] = df["option_pe_live"].shift(1)
+    return df.drop(columns=["_date"])
+
+
 def backtest_instrument(name, csv_path, cfg):
     df = pd.read_csv(csv_path, parse_dates=["timestamp"])
     df = compute_indicators(df)

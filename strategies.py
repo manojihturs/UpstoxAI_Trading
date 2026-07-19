@@ -89,6 +89,43 @@ def signal_pivot_point(row):
     return None
 
 
+def signal_option_level_confirmation(row):
+    """Formalizes a support/resistance idea from a Tamil YouTube options-
+    education video (analyzed 2026-07-19): each day's previous-day-close
+    spot derives a synthetic "confirmation level" (average of the ATM
+    strike's one-step OTM call+put premiums, Black-Scholes-priced).
+    Entry requires the live CE premium to close above that level AND the
+    live PE premium to close below it (bullish), or the mirror image
+    (bearish) -- i.e. call and put must independently "confirm" the same
+    direction, per the video's method. Needs option_confirm_level /
+    option_ce_live / option_pe_live (+ _prev) columns from
+    backtest.add_option_level_columns() -- backtest-only, see that
+    function's docstring.
+
+    IMPORTANT CAVEAT: because both premiums here are Black-Scholes
+    functions of the SAME spot price (put-call parity holds exactly by
+    construction in this simulation), "CE confirms up AND PE confirms up"
+    is mathematically the SAME event as "spot crossed the level," not two
+    independent signals -- this backtest can only test whether the
+    derived level itself is a useful breakout level, not the video's
+    implicit premise that real call/put order flow sometimes diverges
+    from fair value (something simulated premiums structurally cannot
+    represent). Not wired into engine.py for live trading.
+    """
+    if _row_time(row) > LAST_ENTRY_TIME:
+        return None
+    level = row.get("option_confirm_level")
+    ce, pe = row.get("option_ce_live"), row.get("option_pe_live")
+    ce_prev, pe_prev = row.get("option_ce_live_prev"), row.get("option_pe_live_prev")
+    if any(v is None or pd.isna(v) for v in (level, ce, pe, ce_prev, pe_prev)):
+        return None
+    if ce_prev <= level and ce > level and pe_prev >= level and pe < level:
+        return "CE"
+    if ce_prev >= level and ce < level and pe_prev <= level and pe > level:
+        return "PE"
+    return None
+
+
 # ------------------------------------------------------------------ UT Bot
 
 UT_BOT_VARIANTS = {
