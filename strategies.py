@@ -344,7 +344,9 @@ STRATEGIES = {
     },
 }
 
-DEFAULT_STRATEGY = "EMA50_TREND_FILTER"
+DEFAULT_STRATEGY = "UT_BOT_CONSERVATIVE"  # best full-history backtest (see backtest_experiments.py):
+# only strategy profitable on BOTH train (+Rs79,136) and held-out test (+Rs52,621),
+# highest total P&L of all 9 -- backtest_experiments_results.csv, 2026-07-19
 
 
 def get_signal_for_strategy(strategy_name, row):

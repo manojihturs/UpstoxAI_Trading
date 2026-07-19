@@ -17,8 +17,8 @@ def store(tmp_path, monkeypatch):
     return state_store
 
 
-def test_default_active_strategy_is_ema50_trend_filter(store):
-    assert store.get_active_strategy() == "EMA50_TREND_FILTER"
+def test_default_active_strategy_is_ut_bot_conservative(store):
+    assert store.get_active_strategy() == "UT_BOT_CONSERVATIVE"
 
 
 def test_set_and_get_active_strategy(store):

@@ -88,6 +88,48 @@ def run_strategy(strategy_name, df, instrument_name, cfg):
     return trades
 
 
+def load_prepared_instruments():
+    """Shared prep (indicators + realized vol) for every instrument, cached
+    by callers so an on-demand UI backtest doesn't redo this expensive step
+    on every click -- see ui/pages/backtesting_page.py."""
+    return {
+        name: prepare_df(CSV_FILES[name])
+        for name in config.INSTRUMENTS
+        if os.path.exists(CSV_FILES[name])
+    }
+
+
+def run_ui_backtest(strategy_name, from_date=None, to_date=None, prepared=None):
+    """On-demand backtest of ONE strategy over an optional date window,
+    across all instruments -- what the Backtesting page's "Run Backtest"
+    button calls. from_date/to_date are inclusive (date, not datetime);
+    None means no bound on that side. Returns a trades list shaped exactly
+    like backtest.py's (instrument/exit_time/exit_reason/net_pnl), so
+    backtest.compute_summary() can be reused as-is for the display."""
+    if prepared is None:
+        prepared = load_prepared_instruments()
+
+    trades = []
+    for instrument_name, cfg in config.INSTRUMENTS.items():
+        if instrument_name not in prepared:
+            continue
+        df = prepared[instrument_name]
+        # df["timestamp"] is tz-aware (IST, from the source CSVs) -- a naive
+        # pd.Timestamp(from_date) fails the comparison outright (TypeError:
+        # Invalid comparison between dtype=datetime64[...,UTC+05:30] and
+        # Timestamp), so match its tz before comparing.
+        tz = df["timestamp"].dt.tz
+        if from_date is not None:
+            df = df[df["timestamp"] >= pd.Timestamp(from_date, tz=tz)]
+        if to_date is not None:
+            df = df[df["timestamp"] < pd.Timestamp(to_date, tz=tz) + pd.Timedelta(days=1)]
+        if df.empty:
+            continue
+        trades += run_strategy(strategy_name, df, instrument_name, cfg)
+
+    return trades
+
+
 def summarize(trades, label):
     if not trades:
         return {"label": label, "trades": 0, "win_rate": None, "total_pnl": 0.0, "avg_pnl": None}

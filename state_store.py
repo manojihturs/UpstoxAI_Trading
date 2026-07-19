@@ -90,7 +90,7 @@ def init_db():
 
             CREATE TABLE IF NOT EXISTS strategy_state (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
-                active_strategy TEXT NOT NULL DEFAULT 'EMA50_TREND_FILTER'
+                active_strategy TEXT NOT NULL DEFAULT 'UT_BOT_CONSERVATIVE'
             );
 
             CREATE TABLE IF NOT EXISTS timeframe_state (
@@ -543,9 +543,9 @@ def get_active_strategy():
     try:
         row = conn.execute("SELECT * FROM strategy_state WHERE id = 1").fetchone()
         if row is None:
-            conn.execute("INSERT INTO strategy_state (id, active_strategy) VALUES (1, 'EMA50_TREND_FILTER')")
+            conn.execute("INSERT INTO strategy_state (id, active_strategy) VALUES (1, 'UT_BOT_CONSERVATIVE')")
             conn.commit()
-            return "EMA50_TREND_FILTER"
+            return "UT_BOT_CONSERVATIVE"
         return row["active_strategy"]
     finally:
         conn.close()

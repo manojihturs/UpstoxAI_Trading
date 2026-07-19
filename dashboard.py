@@ -94,7 +94,18 @@ current_index = strategy_keys.index(current_strategy) if current_strategy in str
 # remembered value if the backend's active strategy changed underneath it
 # (e.g. from another browser tab) so this tab doesn't keep showing a stale
 # selection either.
-if st.session_state.get("_last_known_strategy") != current_strategy:
+pending_strategy = st.session_state.get("_pending_strategy")
+if pending_strategy is not None and current_strategy == pending_strategy:
+    # engine.py has now applied our own change -- stop suppressing resync
+    st.session_state["_pending_strategy"] = None
+    pending_strategy = None
+
+# Skip resync while our own change is still in flight (pending_strategy set):
+# engine.py only polls control_requests once per loop (~20-30s), so on the
+# next ~5s autorefresh the DB would still show the OLD strategy and this
+# would otherwise snap the dropdown back before the engine catches up,
+# looking like the change silently failed.
+if pending_strategy is None and st.session_state.get("_last_known_strategy") != current_strategy:
     st.session_state["strategy_select"] = strategy_labels[current_index]
     st.session_state["_last_known_strategy"] = current_strategy
 
@@ -104,6 +115,7 @@ def _on_strategy_change():
     chosen_key = strategy_keys[strategy_labels.index(chosen_label)]
     state_store.create_control_request("SET_STRATEGY", {"strategy": chosen_key})
     st.session_state["_last_known_strategy"] = chosen_key
+    st.session_state["_pending_strategy"] = chosen_key
 
 
 st.selectbox(

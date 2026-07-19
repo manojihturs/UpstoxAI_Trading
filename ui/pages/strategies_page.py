@@ -48,6 +48,6 @@ st.caption(
 )
 
 st.divider()
-st.caption("All 7 available strategies:")
+st.caption(f"All {len(strategy_keys)} available strategies:")
 for key in strategy_keys:
     st.markdown(f"- **{strategies.STRATEGIES[key]['label']}**")
