@@ -116,7 +116,16 @@ def compute_sl_points(instrument, entry_premium_raw):
 def evaluate_position(position, current_ltp, current_time, instrument_cfg):
     """Pure function, no I/O: given a position row, a fresh LTP, and the
     current wall-clock time, return (new_current_sl, new_tsl_armed,
-    exit_reason). exit_reason is None if the position should stay open."""
+    exit_reason). exit_reason is None if the position should stay open.
+
+    SL and TSL always apply -- this function cannot be configured to skip
+    them, by design (that's the actual loss protection). The fixed
+    target_price exit is gated by config.STRATEGY["ENABLE_FIXED_TARGET"]:
+    when False (the 2026-07-20 default), a winning trade is never closed
+    just for reaching target_points -- it keeps running until SL/TSL/EOD
+    triggers, letting the trailing stop capture as much of the move as the
+    trend gives. This does NOT reduce how often trades lose; it only
+    changes how much a winner can capture before exiting."""
     entry = position["entry_ltp_net"]
     current_sl = position["current_sl"]
     tsl_armed = bool(position["tsl_armed"])
@@ -134,7 +143,7 @@ def evaluate_position(position, current_ltp, current_time, instrument_cfg):
         exit_reason = "EOD_SQUAREOFF"
     elif current_ltp <= current_sl:
         exit_reason = "TSL" if tsl_armed else "SL"
-    elif current_ltp >= position["target_price"]:
+    elif config.STRATEGY["ENABLE_FIXED_TARGET"] and current_ltp >= position["target_price"]:
         exit_reason = "TARGET"
 
     return current_sl, tsl_armed, exit_reason

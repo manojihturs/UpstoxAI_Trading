@@ -70,10 +70,34 @@ def test_tsl_only_ratchets_up_never_down():
     assert exit_reason is None
 
 
-def test_target_hit():
+def test_target_hit_when_fixed_target_enabled(monkeypatch):
+    monkeypatch.setitem(config.STRATEGY, "ENABLE_FIXED_TARGET", True)
     position = make_position(current_sl=126.0, tsl_armed=True, target=130.0)
     new_sl, tsl_armed, exit_reason = engine.evaluate_position(position, 130.0, BEFORE_SQUAREOFF, NIFTY_CFG)
     assert exit_reason == "TARGET"
+
+
+def test_target_not_hit_by_default_lets_tsl_run_instead():
+    # 2026-07-20: default is ENABLE_FIXED_TARGET=False -- reaching target_price
+    # must NOT close the trade; only SL/TSL/EOD can, so winners can run further.
+    assert config.STRATEGY["ENABLE_FIXED_TARGET"] is False
+    position = make_position(current_sl=126.0, tsl_armed=True, target=130.0)
+    new_sl, tsl_armed, exit_reason = engine.evaluate_position(position, 130.0, BEFORE_SQUAREOFF, NIFTY_CFG)
+    assert exit_reason is None
+    assert new_sl == 126.0  # trailing stop candidate (130-4=126) doesn't beat current_sl, unchanged
+
+
+def test_target_disabled_still_exits_via_tsl_eventually():
+    # confirms "no fixed target" doesn't mean "no exit" -- TSL still catches
+    # the trade once price pulls back far enough from its peak
+    position = make_position(current_sl=126.0, tsl_armed=True, target=130.0)
+    new_sl, tsl_armed, exit_reason = engine.evaluate_position(position, 135.0, BEFORE_SQUAREOFF, NIFTY_CFG)
+    assert exit_reason is None
+    assert new_sl == 131.0  # ratchets up past the old "target" level: 135-4
+
+    position.update(current_sl=new_sl, tsl_armed=tsl_armed)
+    new_sl, tsl_armed, exit_reason = engine.evaluate_position(position, 131.0, BEFORE_SQUAREOFF, NIFTY_CFG)
+    assert exit_reason == "TSL"
 
 
 def test_time_exit_overrides_everything():

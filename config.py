@@ -145,6 +145,18 @@ PCR = {
 STRATEGY = {
     "ENABLE_TREND_FILTER": True,
     "TREND_FILTER_EMA_PERIOD": 50,
+
+    # False (2026-07-20, explicit request): don't cap winners at the fixed
+    # target_points level -- let the trailing stop loss run the trade as
+    # far as the trend goes instead. SL and TSL still exit exactly as
+    # before; this only removes the ADDITIONAL fixed-target exit. Losses
+    # are NOT affected by this toggle -- there is no way to make a
+    # strategy stop losing trades, only to change how winners are taken.
+    # See backtest_experiments.py's target-cap comparison for the actual
+    # historical evidence behind this default, not just the intuition
+    # that "letting winners run" is obviously better (it isn't always --
+    # it trades a higher average win for a lower win rate).
+    "ENABLE_FIXED_TARGET": False,
 }
 
 # ---- Candle timeframe ----
