@@ -8,6 +8,7 @@ are copied verbatim from the original dashboard.py.
 import streamlit as st
 
 import config
+import notifications
 import state_store
 from ui import components
 from ui.theme import inject_global_css, theme_switcher
@@ -128,3 +129,39 @@ for col, name in zip(qty_cols, config.INSTRUMENTS):
             on_change=_make_on_qty_change(name, resync_key, widget_key),
             help=f"1 lot = {lot_size}. Enter a multiple of {lot_size}.",
         )
+
+st.divider()
+
+# --------------------------------------------------------------- notifications
+st.subheader("Telegram Notifications")
+st.caption(
+    "Sent automatically on every entry and exit (engine.py). Configure "
+    "telegram_bot_token / telegram_chat_id in .streamlit/secrets.toml -- see "
+    "TELEGRAM_SETUP.md for the 2-minute setup via @BotFather."
+)
+
+if notifications.is_configured():
+    st.success("Telegram is configured.")
+else:
+    st.warning(
+        "Telegram is NOT configured -- telegram_bot_token and/or telegram_chat_id are "
+        "blank in .streamlit/secrets.toml. Entry/exit notifications are silently skipped "
+        "until both are set."
+    )
+
+if st.button("Send test message"):
+    if not notifications.is_configured():
+        st.error("Can't send -- Telegram isn't configured yet (see above).")
+    else:
+        with st.spinner("Sending..."):
+            sent = notifications.send_telegram_message(
+                "Test message from the Settings page -- Telegram notifications are working."
+            )
+        if sent:
+            st.success("Sent! Check your Telegram chat with the bot.")
+        else:
+            st.error(
+                "Send failed -- Telegram accepted the credentials as present but the API "
+                "call didn't succeed. Double-check the bot token and chat ID are correct "
+                "(see TELEGRAM_SETUP.md), and that this machine has internet access."
+            )
