@@ -31,6 +31,7 @@ import state_store
 import cost_model
 import trade_export
 import strategies
+import notifications
 from signal_engine import compute_indicators, confirm_with_pcr
 from option_selector import (
     get_access_token, get_atm_option, get_intraday_candles, get_live_ltp,
@@ -166,6 +167,14 @@ def manage_open_position(position, headers, current_time):
             trade_export.append_closed_trade(closed)
         except Exception as e:
             print(f"WARNING: failed to append closed trade to Excel backup: {e}")
+
+        try:
+            notifications.notify_exit(
+                position["instrument"], position["direction"], position["strike"],
+                exit_net, exit_reason, net_pnl, qty,
+            )
+        except Exception as e:
+            print(f"WARNING: exit notification failed: {e}")
     else:
         print(f"Holding {position['instrument']} {position['direction']} {position['strike']} | "
               f"live={raw_ltp:.2f} sl={new_sl:.2f} tsl_armed={new_tsl_armed}")
@@ -398,6 +407,14 @@ def handle_confirm(signal_id, headers, today):
     state_store.set_pending_signal_status(signal_id, "CONFIRMED")
     log("ENTRY", f"ENTRY: {sig['instrument']} {sig['direction']} {sig['strike']} @ net {entry_net:.2f} "
                   f"(raw {raw_ltp:.2f}) SL={initial_sl:.2f} target={target_price:.2f}")
+
+    try:
+        notifications.notify_entry(
+            sig["instrument"], sig["direction"], sig["strike"],
+            entry_net, initial_sl, target_price, sig["qty"],
+        )
+    except Exception as e:
+        print(f"WARNING: entry notification failed: {e}")
 
 
 def process_control_requests(headers, today):
