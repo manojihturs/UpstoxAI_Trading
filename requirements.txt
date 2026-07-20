@@ -5,3 +5,5 @@ streamlit
 streamlit-autorefresh
 openpyxl
 pytest
+selenium
+pyotp
