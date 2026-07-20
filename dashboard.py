@@ -30,6 +30,7 @@ import engine
 import strategies
 import cost_model
 import live_validation
+import notifications
 
 st.set_page_config(page_title="Paper Trading Dashboard", layout="wide")
 
@@ -601,3 +602,37 @@ with st.expander("Why this matters before real money"):
         "mean the strategy is proven safe for real money. See **GO_NO_GO_CHECKLIST.md** in "
         "the repo root for the actual numeric gates that decision should be based on."
     )
+
+# --------------------------------------------------------------- notifications
+st.header("Telegram Notifications")
+st.caption(
+    "Sent automatically on every entry and exit (engine.py). Configure "
+    "telegram_bot_token / telegram_chat_id in .streamlit/secrets.toml -- see "
+    "TELEGRAM_SETUP.md for the 2-minute setup via @BotFather."
+)
+
+if notifications.is_configured():
+    st.success("Telegram is configured.")
+else:
+    st.warning(
+        "Telegram is NOT configured -- telegram_bot_token and/or telegram_chat_id are "
+        "blank in .streamlit/secrets.toml. Entry/exit notifications are silently skipped "
+        "until both are set."
+    )
+
+if st.button("Send test message"):
+    if not notifications.is_configured():
+        st.error("Can't send -- Telegram isn't configured yet (see above).")
+    else:
+        with st.spinner("Sending..."):
+            _sent = notifications.send_telegram_message(
+                "Test message from the dashboard -- Telegram notifications are working."
+            )
+        if _sent:
+            st.success("Sent! Check your Telegram chat with the bot.")
+        else:
+            st.error(
+                "Send failed -- Telegram accepted the credentials as present but the API "
+                "call didn't succeed. Double-check the bot token and chat ID are correct "
+                "(see TELEGRAM_SETUP.md), and that this machine has internet access."
+            )
