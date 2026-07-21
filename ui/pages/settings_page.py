@@ -8,8 +8,10 @@ are copied verbatim from the original dashboard.py.
 import streamlit as st
 
 import config
+import engine
 import notifications
 import state_store
+import strategies
 from ui import components
 from ui.theme import inject_global_css, theme_switcher
 
@@ -153,10 +155,17 @@ if st.button("Send test message"):
     if not notifications.is_configured():
         st.error("Can't send -- Telegram isn't configured yet (see above).")
     else:
+        current_strategy_label = strategies.STRATEGIES.get(
+            snapshot["active_strategy"], {}
+        ).get("label", snapshot["active_strategy"])
+        test_message = (
+            "*Test message* from the Settings page -- Telegram notifications are working.\n"
+            f"Strategy: {current_strategy_label}\n"
+            f"Timeframe: {snapshot['active_timeframe']} min\n"
+            f"App: {engine.APP_NAME}"
+        )
         with st.spinner("Sending..."):
-            sent = notifications.send_telegram_message(
-                "Test message from the Settings page -- Telegram notifications are working."
-            )
+            sent = notifications.send_telegram_message(test_message)
         if sent:
             st.success("Sent! Check your Telegram chat with the bot.")
         else:
