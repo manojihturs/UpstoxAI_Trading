@@ -159,7 +159,7 @@ if st.button("Send test message"):
             snapshot["active_strategy"], {}
         ).get("label", snapshot["active_strategy"])
         test_message = (
-            "*Test message* from the Settings page -- Telegram notifications are working.\n"
+            "Test message from the Settings page -- Telegram notifications are working.\n"
             f"Strategy: {current_strategy_label}\n"
             f"Timeframe: {snapshot['active_timeframe']} min\n"
             f"App: {engine.APP_NAME}"

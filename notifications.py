@@ -55,9 +55,18 @@ def send_telegram_message(text):
         return False
 
     try:
+        # No parse_mode: Telegram's Markdown mode treats _ * ` [ as
+        # formatting delimiters, and any unpaired one (e.g. a literal
+        # underscore in an app/strategy name -- found 2026-07-21 with
+        # "UpstoxAiTrading_NewUI") makes the WHOLE message fail with a 400
+        # "can't parse entities" error, silently swallowed by this
+        # function's try/except. That's a real trade-notification going
+        # missing over a cosmetic formatting choice -- not worth the
+        # bold/italic text. Sent as plain text instead; always delivers
+        # regardless of what's in instrument names, strategy labels, etc.
         resp = requests.post(
             TELEGRAM_API_URL.format(token=token),
-            json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
+            json={"chat_id": chat_id, "text": text},
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
         return resp.status_code == 200
@@ -86,13 +95,13 @@ def format_entry_message(instrument, direction, strike, entry_net, sl, target, q
                           strategy=None, app_name=None):
     direction_label = "CALL (CE)" if direction == "CE" else "PUT (PE)"
     return (
-        f"*ENTRY* -- {instrument} {strike} {direction_label}\n"
+        f"ENTRY -- {instrument} {strike} {direction_label}\n"
         f"Strategy: {_strategy_label(strategy)}\n"
         f"App: {app_name or 'unknown'}\n"
         f"Qty: {qty}\n"
         f"Entry: Rs {entry_net:,.2f}\n"
         f"SL: Rs {sl:,.2f}  |  Target: Rs {target:,.2f}\n"
-        f"_Paper trade -- no real order placed._"
+        f"Paper trade -- no real order placed."
     )
 
 
@@ -101,13 +110,13 @@ def format_exit_message(instrument, direction, strike, exit_net, exit_reason, ne
     direction_label = "CALL (CE)" if direction == "CE" else "PUT (PE)"
     tone = "PROFIT" if net_pnl >= 0 else "LOSS"
     return (
-        f"*EXIT ({exit_reason})* -- {instrument} {strike} {direction_label}\n"
+        f"EXIT ({exit_reason}) -- {instrument} {strike} {direction_label}\n"
         f"Strategy: {_strategy_label(strategy)}\n"
         f"App: {app_name or 'unknown'}\n"
         f"Qty: {qty}\n"
         f"Exit: Rs {exit_net:,.2f}\n"
         f"Net P&L: Rs {net_pnl:,.2f} ({tone})\n"
-        f"_Paper trade -- no real order placed._"
+        f"Paper trade -- no real order placed."
     )
 
 
