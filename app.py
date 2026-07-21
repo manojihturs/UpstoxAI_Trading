@@ -62,7 +62,7 @@ if st.secrets.get("require_login", True) and not check_password():
 
 st_autorefresh(interval=5000, key="refresh")
 
-engine.ensure_background_thread(app_name="UpstoxAiTrading_NewUI")  # no-op after the first call in this process
+engine.ensure_background_thread(app_name="UpstoxAItrading")  # no-op after the first call in this process
 
 pages = [
     st.Page("ui/pages/dashboard_home.py", title="Dashboard", icon=":material/dashboard:", default=True),
