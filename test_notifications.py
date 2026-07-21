@@ -100,6 +100,39 @@ def test_format_exit_message_loss_tone():
     assert "SL" in msg
 
 
+def test_format_entry_message_shows_strategy_label_and_app_name():
+    msg = notifications.format_entry_message(
+        "NIFTY", "CE", 24100.0, 120.5, 114.1, 130.5, 65,
+        strategy="UT_BOT_CONSERVATIVE", app_name="dashboard.py",
+    )
+    assert "UT Bot conservative" in msg
+    assert "dashboard.py" in msg
+
+
+def test_format_exit_message_shows_strategy_label_and_app_name():
+    msg = notifications.format_exit_message(
+        "NIFTY", "CE", 24100.0, 128.0, "TARGET", 150.0, 65,
+        strategy="SWING_STRUCTURE", app_name="app.py",
+    )
+    assert "Swing structure break" in msg
+    assert "app.py" in msg
+
+
+def test_format_message_falls_back_gracefully_when_strategy_unknown():
+    msg = notifications.format_entry_message(
+        "NIFTY", "CE", 24100.0, 120.5, 114.1, 130.5, 65,
+        strategy="SOME_RETIRED_STRATEGY_KEY", app_name=None,
+    )
+    assert "SOME_RETIRED_STRATEGY_KEY" in msg  # falls back to the raw key
+    assert "unknown" in msg  # app_name defaults to "unknown" when not given
+
+
+def test_format_message_handles_no_strategy_at_all():
+    # positions opened before the strategy column existed have strategy=None
+    msg = notifications.format_entry_message("NIFTY", "CE", 24100.0, 120.5, 114.1, 130.5, 65)
+    assert "unknown strategy" in msg
+
+
 def test_notify_entry_calls_send_with_formatted_message(monkeypatch):
     captured = {}
     monkeypatch.setattr(notifications, "send_telegram_message", lambda text: captured.setdefault("text", text))

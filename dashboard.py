@@ -63,7 +63,7 @@ if st.secrets.get("require_login", True) and not check_password():
 
 st_autorefresh(interval=5000, key="refresh")
 
-engine.ensure_background_thread()  # no-op after the first call in this process
+engine.ensure_background_thread(app_name="UpstoxAiTrading_ClassicUI")  # no-op after the first call in this process
 
 snapshot = state_store.get_dashboard_snapshot()
 today_str = datetime.date.today().isoformat()
@@ -624,10 +624,17 @@ if st.button("Send test message"):
     if not notifications.is_configured():
         st.error("Can't send -- Telegram isn't configured yet (see above).")
     else:
+        _current_strategy_label = strategies.STRATEGIES.get(
+            current_strategy, {}
+        ).get("label", current_strategy)
+        _test_message = (
+            "Test message from the dashboard -- Telegram notifications are working.\n"
+            f"Strategy: {_current_strategy_label}\n"
+            f"Timeframe: {current_timeframe} min\n"
+            f"App: {engine.APP_NAME}"
+        )
         with st.spinner("Sending..."):
-            _sent = notifications.send_telegram_message(
-                "Test message from the dashboard -- Telegram notifications are working."
-            )
+            _sent = notifications.send_telegram_message(_test_message)
         if _sent:
             st.success("Sent! Check your Telegram chat with the bot.")
         else:

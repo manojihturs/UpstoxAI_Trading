@@ -11,3 +11,4 @@ __pycache__/
 .claude/
 .pytest_cache/
 .venv/
+drivers/
