@@ -37,7 +37,19 @@ current_timeframe = snapshot["active_timeframe"]
 current_tf_index = timeframe_options.index(current_timeframe) if current_timeframe in timeframe_options else \
     timeframe_options.index(config.TIMEFRAME["DEFAULT_MINUTES"])
 
-if st.session_state.get("_last_known_timeframe") != current_timeframe:
+# Same fix as the strategy picker (see its comment above for the full
+# explanation): suppress the DB resync while OUR OWN change is still in
+# flight, or engine.py's ~20-30s poll lag vs the ~5s autorefresh snaps the
+# widget back to the old value before the engine has even applied the new
+# one -- looks exactly like the setting silently reverted itself (this bug
+# was live and reproduced 2026-07-21: a 3min timeframe request got
+# reverted to 15min ~30s later mid-session).
+pending_timeframe = st.session_state.get("_pending_timeframe")
+if pending_timeframe is not None and current_timeframe == pending_timeframe:
+    st.session_state["_pending_timeframe"] = None
+    pending_timeframe = None
+
+if pending_timeframe is None and st.session_state.get("_last_known_timeframe") != current_timeframe:
     st.session_state["timeframe_select"] = timeframe_labels[current_tf_index]
     st.session_state["_last_known_timeframe"] = current_timeframe
 
@@ -47,6 +59,7 @@ def _on_timeframe_change():
     chosen_minutes = timeframe_options[timeframe_labels.index(chosen_label)]
     state_store.create_control_request("SET_TIMEFRAME", {"minutes": chosen_minutes})
     st.session_state["_last_known_timeframe"] = chosen_minutes
+    st.session_state["_pending_timeframe"] = chosen_minutes
 
 
 st.selectbox(
