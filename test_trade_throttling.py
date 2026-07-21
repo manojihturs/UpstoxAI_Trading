@@ -101,6 +101,29 @@ def test_consecutive_losses_zero_with_no_trades(store):
     assert store.get_consecutive_losses("2026-07-17") == 0
 
 
+def test_open_position_persists_strategy(store):
+    pid = store.open_position("NIFTY", "CE", 24800, "2026-07-17", "NSE_FO|TEST", 65,
+                               120.0, 120.6, 113.6, 130.6, strategy="UT_BOT_CONSERVATIVE")
+    position = store.get_open_position()
+    assert position["id"] == pid
+    assert position["strategy"] == "UT_BOT_CONSERVATIVE"
+
+
+def test_open_position_strategy_defaults_to_none(store):
+    store.open_position("NIFTY", "CE", 24800, "2026-07-17", "NSE_FO|TEST", 65,
+                         120.0, 120.6, 113.6, 130.6)
+    position = store.get_open_position()
+    assert position["strategy"] is None
+
+
+def test_closed_position_keeps_its_entry_strategy(store):
+    pid = store.open_position("NIFTY", "CE", 24800, "2026-07-17", "NSE_FO|TEST", 65,
+                               120.0, 120.6, 113.6, 130.6, strategy="SWING_STRUCTURE")
+    store.close_position(pid, 130.0, 129.5, "TARGET", 500.0, 10.0, 490.0)
+    closed = store.get_position_by_id(pid)
+    assert closed["strategy"] == "SWING_STRUCTURE"
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))

@@ -66,10 +66,29 @@ def send_telegram_message(text):
         return False
 
 
-def format_entry_message(instrument, direction, strike, entry_net, sl, target, qty):
+def _strategy_label(strategy_key):
+    """Human-readable label for a strategies.STRATEGIES key, e.g.
+    "UT_BOT_CONSERVATIVE" -> "UT Bot conservative (KeyValue=2, ATR=14)".
+    Falls back to the raw key (or "unknown") rather than raising, since a
+    notification failure must never interrupt the trading loop that
+    triggers it -- imported lazily to avoid a module-load-order dependency
+    between notifications.py and strategies.py."""
+    if not strategy_key:
+        return "unknown strategy"
+    try:
+        import strategies
+        return strategies.STRATEGIES.get(strategy_key, {}).get("label", strategy_key)
+    except Exception:
+        return strategy_key
+
+
+def format_entry_message(instrument, direction, strike, entry_net, sl, target, qty,
+                          strategy=None, app_name=None):
     direction_label = "CALL (CE)" if direction == "CE" else "PUT (PE)"
     return (
         f"*ENTRY* -- {instrument} {strike} {direction_label}\n"
+        f"Strategy: {_strategy_label(strategy)}\n"
+        f"App: {app_name or 'unknown'}\n"
         f"Qty: {qty}\n"
         f"Entry: Rs {entry_net:,.2f}\n"
         f"SL: Rs {sl:,.2f}  |  Target: Rs {target:,.2f}\n"
@@ -77,11 +96,14 @@ def format_entry_message(instrument, direction, strike, entry_net, sl, target, q
     )
 
 
-def format_exit_message(instrument, direction, strike, exit_net, exit_reason, net_pnl, qty):
+def format_exit_message(instrument, direction, strike, exit_net, exit_reason, net_pnl, qty,
+                         strategy=None, app_name=None):
     direction_label = "CALL (CE)" if direction == "CE" else "PUT (PE)"
     tone = "PROFIT" if net_pnl >= 0 else "LOSS"
     return (
         f"*EXIT ({exit_reason})* -- {instrument} {strike} {direction_label}\n"
+        f"Strategy: {_strategy_label(strategy)}\n"
+        f"App: {app_name or 'unknown'}\n"
         f"Qty: {qty}\n"
         f"Exit: Rs {exit_net:,.2f}\n"
         f"Net P&L: Rs {net_pnl:,.2f} ({tone})\n"
@@ -89,9 +111,13 @@ def format_exit_message(instrument, direction, strike, exit_net, exit_reason, ne
     )
 
 
-def notify_entry(instrument, direction, strike, entry_net, sl, target, qty):
-    send_telegram_message(format_entry_message(instrument, direction, strike, entry_net, sl, target, qty))
+def notify_entry(instrument, direction, strike, entry_net, sl, target, qty, strategy=None, app_name=None):
+    send_telegram_message(
+        format_entry_message(instrument, direction, strike, entry_net, sl, target, qty, strategy, app_name)
+    )
 
 
-def notify_exit(instrument, direction, strike, exit_net, exit_reason, net_pnl, qty):
-    send_telegram_message(format_exit_message(instrument, direction, strike, exit_net, exit_reason, net_pnl, qty))
+def notify_exit(instrument, direction, strike, exit_net, exit_reason, net_pnl, qty, strategy=None, app_name=None):
+    send_telegram_message(
+        format_exit_message(instrument, direction, strike, exit_net, exit_reason, net_pnl, qty, strategy, app_name)
+    )

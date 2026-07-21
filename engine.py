@@ -181,6 +181,7 @@ def manage_open_position(position, headers, current_time):
             notifications.notify_exit(
                 position["instrument"], position["direction"], position["strike"],
                 exit_net, exit_reason, net_pnl, qty,
+                position.get("strategy"), APP_NAME,
             )
         except Exception as e:
             print(f"WARNING: exit notification failed: {e}")
@@ -399,10 +400,12 @@ def handle_confirm(signal_id, headers, today):
     entry_net = cost_model.apply_slippage(raw_ltp, "BUY")
     initial_sl = entry_net - sl_points
     target_price = entry_net + config.INSTRUMENTS[sig["instrument"]]["target_points"]
+    active_strategy = state_store.get_active_strategy()
 
     new_position_id = state_store.open_position(
         sig["instrument"], sig["direction"], sig["strike"], sig["expiry"],
-        sig["instrument_key"], sig["qty"], raw_ltp, entry_net, initial_sl, target_price)
+        sig["instrument_key"], sig["qty"], raw_ltp, entry_net, initial_sl, target_price,
+        strategy=active_strategy)
     if new_position_id is None:
         # The earlier get_open_position() check above passed, but another
         # engine loop (e.g. a second process against the same DB) won the
@@ -421,6 +424,7 @@ def handle_confirm(signal_id, headers, today):
         notifications.notify_entry(
             sig["instrument"], sig["direction"], sig["strike"],
             entry_net, initial_sl, target_price, sig["qty"],
+            active_strategy, APP_NAME,
         )
     except Exception as e:
         print(f"WARNING: entry notification failed: {e}")
@@ -587,14 +591,24 @@ def main():
 _background_thread_lock = threading.Lock()
 _background_thread_started = False
 
+# Which entrypoint file's process this engine loop is running inside --
+# dashboard.py and app.py can both be running at once against the same
+# trading_state.db (see the "another engine instance" warning in
+# scan_for_signal's docstring history), so Telegram notifications include
+# this to make clear which one actually took the trade. Set via
+# ensure_background_thread(app_name=...); "unknown" if never set (e.g. a
+# standalone script that imports engine.py directly).
+APP_NAME = "unknown"
 
-def ensure_background_thread():
+
+def ensure_background_thread(app_name="unknown"):
     """Start the engine loop in a background daemon thread, exactly once
     per process. Safe to call on every Streamlit rerun -- a no-op once the
     thread is already running. This is how dashboard.py keeps the engine
     alive on hosts (like Streamlit Community Cloud) that only run a single
     process with no separate worker."""
-    global _background_thread_started
+    global _background_thread_started, APP_NAME
+    APP_NAME = app_name
     with _background_thread_lock:
         if _background_thread_started:
             return

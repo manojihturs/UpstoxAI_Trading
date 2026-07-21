@@ -77,7 +77,8 @@ def init_db():
                 exit_reason TEXT,
                 gross_pnl REAL,
                 costs_total REAL,
-                net_pnl REAL
+                net_pnl REAL,
+                strategy TEXT
             );
 
             CREATE TABLE IF NOT EXISTS daily_summary (
@@ -179,6 +180,15 @@ def _migrate(conn):
         conn.execute("ALTER TABLE positions ADD COLUMN last_seen_ltp REAL")
     if "last_seen_at" not in existing_cols:
         conn.execute("ALTER TABLE positions ADD COLUMN last_seen_at TEXT")
+    if "strategy" not in existing_cols:
+        # Which named strategy (strategies.STRATEGIES key) proposed this
+        # trade -- persisted at entry so the EXIT notification/Telegram
+        # message reports the strategy that actually opened the trade, not
+        # whatever's active now (a position can outlive a live strategy
+        # switch -- see dashboard's "keeps running under whatever strategy
+        # proposed it" caption). NULL for positions opened before this
+        # column existed.
+        conn.execute("ALTER TABLE positions ADD COLUMN strategy TEXT")
 
 
 # ---------------------------------------------------------------- pending_signals
@@ -255,7 +265,7 @@ def expire_stale_pending_signals():
 # ---------------------------------------------------------------------- positions
 
 def open_position(instrument, direction, strike, expiry, instrument_key, qty,
-                   entry_ltp_raw, entry_ltp_net, initial_sl, target_price):
+                   entry_ltp_raw, entry_ltp_net, initial_sl, target_price, strategy=None):
     """Atomically opens a position ONLY if no other position is already
     OPEN. The INSERT...SELECT...WHERE NOT EXISTS runs as a single SQL
     statement/transaction, which SQLite's single-writer lock (see
@@ -275,12 +285,12 @@ def open_position(instrument, direction, strike, expiry, instrument_key, qty,
             """INSERT INTO positions
                (instrument, direction, strike, expiry, instrument_key, qty,
                 entry_time, entry_ltp_raw, entry_ltp_net, initial_sl, current_sl,
-                tsl_armed, target_price, status)
-               SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'OPEN'
+                tsl_armed, target_price, status, strategy)
+               SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'OPEN', ?
                WHERE NOT EXISTS (SELECT 1 FROM positions WHERE status = 'OPEN')""",
             (instrument, direction, strike, expiry, instrument_key, qty,
              _now_iso(), entry_ltp_raw, entry_ltp_net, initial_sl, initial_sl,
-             target_price),
+             target_price, strategy),
         )
         conn.commit()
         return cur.lastrowid if cur.rowcount > 0 else None
